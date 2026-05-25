@@ -50,6 +50,11 @@ async function loadGeography(key) {
   state.geojson = geo;
   state.meta = meta;
 
+  // Reset slider to geography's default tile count
+  const slider = $("tiles");
+  slider.value = g.cartogramTiles;
+  $("tilesLabel").textContent = g.cartogramTiles;
+
   const dsEl = $("dataset");
   dsEl.innerHTML = "";
   for (const [k, v] of Object.entries(meta.datasets)) {
@@ -90,15 +95,27 @@ async function init() {
   $("year").addEventListener("change", render);
   $("showCities").addEventListener("change", render);
   $("download").addEventListener("click", downloadPng);
+  $("tiles").addEventListener("input", (e) => {
+    $("tilesLabel").textContent = e.target.value;
+  });
+  $("tiles").addEventListener("change", render);
 
   document.querySelectorAll(".modeBtn").forEach((btn) => {
     btn.addEventListener("click", () => {
       document.querySelectorAll(".modeBtn").forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
       state.mode = btn.dataset.mode;
+      updateTilesRowVisibility();
       render();
     });
   });
+  updateTilesRowVisibility();
+}
+
+function updateTilesRowVisibility() {
+  const row = $("tilesRow");
+  if (!row) return;
+  row.style.display = state.mode === "cartogram" ? "" : "none";
 }
 
 function renderLegend() {
@@ -174,8 +191,9 @@ function render() {
   const elapsed = (performance.now() - t0).toFixed(0);
   const totalValue = Object.values(values).reduce((a, b) => a + b, 0);
   $("status").textContent = `Total: ${formatNum(totalValue)} ${ds.unit}  ·  ${elapsed}ms`;
+  const tileCount = +$("tiles").value || geog.cartogramTiles;
   $("tileMeta").textContent = ({
-    cartogram: `Cartograma · diferències amplificades · ${formatNum(totalValue)} ${ds.unit} totals`,
+    cartogram: `Cartograma · 1 bloc ≈ ${formatNum(totalValue / tileCount)} ${ds.unit} · diferències amplificades`,
     dorling: "Dorling (1 cercle per regió, mida = valor)",
     scaled: "Escalat · formes reals, mida ∝ valor",
   })[state.mode] || "";
@@ -238,10 +256,6 @@ function drawChoropleth({ values, ds, year, geog }) {
 // ---- Mode 2: Cartogram (existing) ----
 
 function drawCartogramMode({ values, ds, year, populationByRegion, geog }) {
-  // Exaggerate the spread: large regions get visibly bigger, tiny regions
-  // shrink — inequality reads stronger than a linear cartogram. Power chosen
-  // empirically so Spain's Madrid + Catalunya still occupy a fair area
-  // share but small CCAA like La Rioja/Ceuta become unmistakably small.
   const EXAGGERATE = 1.4;
   const exaggerated = {};
   for (const [k, v] of Object.entries(values)) {
@@ -252,7 +266,7 @@ function drawCartogramMode({ values, ds, year, populationByRegion, geog }) {
     geojson: state.geojson,
     values: exaggerated,
     regionKey: state.meta.regions.key,
-    totalTiles: geog.cartogramTiles,
+    totalTiles: +$("tiles").value,
     width: W,
     height: H,
     projection: geog.projection,
