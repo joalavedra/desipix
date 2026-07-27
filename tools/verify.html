@@ -1,0 +1,77 @@
+<!doctype html><meta charset="utf-8"><title>verify</title><body><pre id="out">running…</pre><div id="maps"></div>
+<script type="module">
+import { buildCartogram, spainProjection, europeProjection, cataloniaProjection } from "../src/cartogram.js";
+const GEO = {
+  spain:     { geo:"../data/spain-ccaa.geojson",          ds:"../data/spain-datasets.json",     proj:spainProjection,     tiles:1000 },
+  catalonia: { geo:"../data/catalonia-comarques.geojson", ds:"../data/catalonia-datasets.json", proj:cataloniaProjection, tiles:1500 },
+  europe:    { geo:"../data/europe-nuts2.geojson",        ds:"../data/europe-datasets.json",    proj:europeProjection,    tiles:2500 },
+};
+function d3proj(geojson, projFactory) {
+  const { project } = projFactory(geojson, 900, 800);
+  const out = {};
+  for (const f of geojson.features) {
+    const id = f.properties.id ?? f.properties.cod_ccaa;
+    const polys = f.geometry.type === "Polygon" ? [f.geometry.coordinates] : f.geometry.coordinates;
+    let sx=0, sy=0, n=0;
+    for (const poly of polys) for (const c of poly[0]) {
+      const p = project(c, id); if (p && isFinite(p[0])) { sx+=p[0]; sy+=p[1]; n++; }
+    }
+    if (n) out[id] = [sx/n, sy/n];
+  }
+  return out;
+}
+const lines = [];
+for (const [name, g] of Object.entries(GEO)) {
+  const [geojson, meta] = await Promise.all([fetch(g.geo).then(r=>r.json()), fetch(g.ds).then(r=>r.json())]);
+  const years = Object.keys(meta.datasets.population.values).sort();
+  const values = meta.datasets.population.values[years.at(-1)];
+  const t0 = performance.now();
+  const res = buildCartogram({ geojson, values, regionKey: meta.regions.key, totalTiles: g.tiles,
+    width: 900, height: 800, projection: g.proj });
+  const ms = (performance.now()-t0).toFixed(0);
+  const e = res.allocationError;
+  const got = {}; for (const c of res.cells) got[c.regionId]=(got[c.regionId]||0)+1;
+  // Compactness: how close each blob is to a disc of the same tile count.
+  const byR = new Map();
+  for (const c of res.cells) { if(!byR.has(c.regionId)) byR.set(c.regionId,[]); byR.get(c.regionId).push(c); }
+  const compact = [];
+  for (const [id, cells] of byR) {
+    if (cells.length < 8) continue;
+    const cx = cells.reduce((s,c)=>s+c.x,0)/cells.length, cy = cells.reduce((s,c)=>s+c.y,0)/cells.length;
+    const meanR = cells.reduce((s,c)=>s+Math.hypot(c.x-cx,c.y-cy),0)/cells.length;
+    const discR = Math.sqrt(cells.length/Math.PI)*res.tileSide*(2/3);
+    compact.push(meanR/discR);
+  }
+  const compactness = compact.reduce((a,b)=>a+b,0)/compact.length;
+  // Geographic drift: distance from each region's true centroid to its blob
+  // centroid, as a fraction of the map's diagonal.
+  const path = d3proj(geojson, g.proj);
+  const drifts = [];
+  for (const [id, cells] of byR) {
+    const truth = path[id]; if (!truth) continue;
+    const cx = cells.reduce((s,c)=>s+c.x,0)/cells.length, cy = cells.reduce((s,c)=>s+c.y,0)/cells.length;
+    drifts.push(Math.hypot(cx-truth[0], cy-truth[1]) / Math.hypot(900,800));
+  }
+  drifts.sort((a,b)=>a-b);
+  const drift = drifts.reduce((a,b)=>a+b,0)/drifts.length;
+  const worst = Object.entries(res.targets).filter(([,t])=>t>=3)
+    .map(([r,t])=>({r, label: meta.regions.labels[r], t, g:got[r]||0, pct: Math.round(((got[r]||0)-t)/t*100)}))
+    .sort((a,b)=>Math.abs(b.pct)-Math.abs(a.pct)).slice(0,4);
+  const ns="http://www.w3.org/2000/svg";
+  const svg=document.createElementNS(ns,"svg");
+  svg.setAttribute("viewBox","0 0 900 800"); svg.setAttribute("width","420");
+  svg.style.cssText="background:#fff;border:1px solid #ccc;margin:4px";
+  const pal=meta.regions.colors;
+  for (const c of res.cells){
+    const r=document.createElementNS(ns,"rect");
+    r.setAttribute("x",c.x-res.tileSide/2); r.setAttribute("y",c.y-res.tileSide/2);
+    r.setAttribute("width",res.tileSide); r.setAttribute("height",res.tileSide);
+    r.setAttribute("fill",pal[c.regionId]||"#999"); svg.appendChild(r);
+  }
+  document.getElementById("maps").appendChild(svg);
+  lines.push(`${name.padEnd(10)} cells=${String(res.cells.length).padStart(5)}/${g.tiles}  meanErr=${e.mean.toFixed(1)}%  medianErr=${e.median.toFixed(1)}%  maxErr=${e.max.toFixed(0)}%  n=${e.n}  compact=${compactness.toFixed(2)}  drift=${(drift*100).toFixed(1)}%/p95 ${(drifts[Math.floor(drifts.length*0.95)]*100).toFixed(1)}%  ${ms}ms`);
+  for (const w of worst) lines.push(`             ${String(w.label).slice(0,26).padEnd(27)} want ${String(w.t).padStart(4)}  got ${String(w.g).padStart(4)}  ${w.pct>0?'+':''}${w.pct}%`);
+}
+document.getElementById("out").textContent = lines.join("\n");
+window.__done = true;
+</script></body>

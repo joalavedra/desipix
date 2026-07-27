@@ -1,156 +1,469 @@
 <!doctype html>
-<html lang="en">
+<html lang="ca" data-theme="light">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Pixelmaps — tile cartograms</title>
+    <title>desipix — cartogrames de blocs</title>
+    <meta
+      name="description"
+      content="Cartogrames de blocs d'Espanya, Catalunya i Europa. La mida mostra el pes; el color, l'indicador."
+    />
     <style>
       :root {
         color-scheme: light;
-        --bg: #f4f4f1;
-        --panel: #ffffff;
-        --ink: #1a1a1a;
-        --muted: #6b6b6b;
-        --border: #d8d8d4;
+        --surface: #fcfcfb;
+        --plane: #f9f9f7;
+        --ink: #0b0b0b;
+        --ink-secondary: #52514e;
+        --ink-muted: #898781;
+        --grid: #e1e0d9;
+        --axis: #c3c2b7;
+        --border: rgba(11, 11, 11, 0.1);
+        --no-data: #dedcd4;
+        --accent: #2a78d6;
+        --control-bg: #ffffff;
       }
-      * { box-sizing: border-box; }
+      :root[data-theme="dark"] {
+        color-scheme: dark;
+        --surface: #1a1a19;
+        --plane: #0d0d0d;
+        --ink: #ffffff;
+        --ink-secondary: #c3c2b7;
+        --ink-muted: #898781;
+        --grid: #2c2c2a;
+        --axis: #383835;
+        --border: rgba(255, 255, 255, 0.1);
+        --no-data: #333331;
+        --accent: #3987e5;
+        --control-bg: #232322;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
       body {
         margin: 0;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        background: var(--bg);
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        background: var(--plane);
         color: var(--ink);
         display: grid;
-        grid-template-columns: 280px 1fr;
+        grid-template-columns: 292px minmax(0, 1fr);
         min-height: 100vh;
       }
+
       aside {
-        background: var(--panel);
+        background: var(--surface);
         border-right: 1px solid var(--border);
         padding: 20px;
         display: flex;
         flex-direction: column;
-        gap: 16px;
+        gap: 18px;
+        max-height: 100vh;
+        overflow-y: auto;
       }
-      h1 { font-size: 18px; margin: 0 0 4px; }
-      .subtitle { font-size: 12px; color: var(--muted); margin: 0; }
-      label { font-size: 12px; font-weight: 600; display: block; margin-bottom: 4px; }
-      select, input[type="range"], input[type="number"], button {
-        width: 100%;
-        font: inherit;
-        padding: 6px 8px;
-        border: 1px solid var(--border);
-        border-radius: 4px;
-        background: white;
+      .brand {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
       }
-      button {
-        background: var(--ink);
-        color: white;
-        border: none;
-        cursor: pointer;
+      h1 {
+        font-size: 17px;
+        margin: 0;
+        letter-spacing: -0.01em;
+      }
+      .tagline {
+        font-size: 12px;
+        color: var(--ink-secondary);
+        margin: 4px 0 0;
+        line-height: 1.45;
+      }
+
+      .field > label,
+      .field-label {
+        font-size: 11px;
         font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--ink-muted);
+        display: block;
+        margin-bottom: 6px;
       }
-      button:hover { background: #333; }
-      .modeBtn {
-        flex: 1;
+      select,
+      button,
+      input[type="range"] {
+        font: inherit;
+        width: 100%;
+        color: var(--ink);
+      }
+      select {
+        padding: 7px 8px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--control-bg);
+        font-size: 13px;
+      }
+      select:disabled {
+        opacity: 0.45;
+      }
+      .seg {
+        display: grid;
+        grid-auto-flow: column;
+        gap: 4px;
+        background: var(--plane);
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        padding: 3px;
+      }
+      .seg button {
+        border: none;
+        background: none;
+        border-radius: 5px;
         padding: 6px 4px;
         font-size: 12px;
-        background: white;
-        color: var(--ink);
-        border: 1px solid var(--border);
+        font-weight: 500;
+        cursor: pointer;
+        color: var(--ink-secondary);
       }
-      .modeBtn.active { background: var(--ink); color: white; border-color: var(--ink); }
-      .modeBtn:hover { background: #f0f0ee; color: var(--ink); }
-      .modeBtn.active:hover { background: #333; color: white; }
-      .row { display: flex; gap: 8px; align-items: center; }
-      .row > * { flex: 1; }
-      .stat { font-size: 11px; color: var(--muted); }
-      main {
-        padding: 24px;
+      .seg button[aria-pressed="true"] {
+        background: var(--ink);
+        color: var(--surface);
+        font-weight: 600;
+      }
+      .ghost {
+        border: 1px solid var(--border);
+        background: var(--control-bg);
+        border-radius: 6px;
+        padding: 8px;
+        font-size: 12.5px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .ghost:hover {
+        border-color: var(--ink-muted);
+      }
+      .icon-btn {
+        width: auto;
+        border: none;
+        background: none;
+        cursor: pointer;
+        color: var(--ink-muted);
+        font-size: 15px;
+        padding: 2px 4px;
+        line-height: 1;
+      }
+
+      .swatches {
         display: flex;
+        border-radius: 4px;
+        overflow: hidden;
+        height: 12px;
+      }
+      .swatches > i {
+        flex: 1;
+      }
+      .scale-ends {
+        display: flex;
+        justify-content: space-between;
+        font-size: 10.5px;
+        color: var(--ink-muted);
+        margin-top: 5px;
+        font-variant-numeric: tabular-nums;
+      }
+      .note {
+        font-size: 11.5px;
+        color: var(--ink-muted);
+        line-height: 1.5;
+        margin: 0;
+      }
+      .note a {
+        color: var(--ink-secondary);
+      }
+
+      .region-picker {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+      }
+      .chip {
+        border: 1px solid var(--border);
+        background: var(--control-bg);
+        border-radius: 999px;
+        padding: 4px 9px;
+        font-size: 11.5px;
+        cursor: pointer;
+        width: auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+      }
+      .chip[aria-pressed="true"] {
+        border-color: transparent;
+        color: #fff;
+      }
+      .chip .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: currentColor;
+      }
+
+      main {
+        padding: 22px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        min-width: 0;
+      }
+      .views {
+        display: flex;
+        gap: 4px;
+      }
+      .views button {
+        width: auto;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        border-radius: 999px;
+        padding: 6px 15px;
+        font-size: 13px;
+        cursor: pointer;
+        color: var(--ink-secondary);
+      }
+      .views button[aria-pressed="true"] {
+        background: var(--ink);
+        color: var(--surface);
+        border-color: var(--ink);
+        font-weight: 600;
+      }
+
+      .canvas {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 8px;
+        position: relative;
+        min-width: 0;
+      }
+      svg {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+      .canvas[data-busy="true"] svg {
+        opacity: 0.45;
+        transition: opacity 0.12s;
+      }
+      .spinner {
+        position: absolute;
+        inset: 0;
+        display: none;
         align-items: center;
         justify-content: center;
+        font-size: 12.5px;
+        color: var(--ink-muted);
       }
-      #stage {
-        background: white;
+      .canvas[data-busy="true"] .spinner {
+        display: flex;
+      }
+
+      .readout {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 18px;
+        font-size: 12px;
+        color: var(--ink-secondary);
+      }
+      .readout b {
+        color: var(--ink);
+        font-weight: 600;
+      }
+
+      #tooltip {
+        position: fixed;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.08s;
+        background: var(--surface);
         border: 1px solid var(--border);
-        max-width: 100%;
-        max-height: 90vh;
+        border-radius: 8px;
+        padding: 8px 11px;
+        font-size: 12.5px;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.14);
+        z-index: 20;
+        max-width: 240px;
       }
-      .legend {
-        font-size: 11px;
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 4px 8px;
+      #tooltip[data-show="true"] {
+        opacity: 1;
       }
-      .legend > div { display: flex; align-items: center; gap: 6px; }
-      .legend .sw { width: 10px; height: 10px; border: 1px solid rgba(0,0,0,.2); }
+      #tooltip .t-name {
+        font-weight: 600;
+        margin-bottom: 3px;
+      }
+      #tooltip .t-row {
+        color: var(--ink-secondary);
+        font-variant-numeric: tabular-nums;
+      }
+
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 12.5px;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 5px 10px;
+        border-bottom: 1px solid var(--grid);
+      }
+      td.num,
+      th.num {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      details > summary {
+        cursor: pointer;
+        font-size: 12.5px;
+        color: var(--ink-secondary);
+        padding: 6px 0;
+      }
+      .table-wrap {
+        max-height: 340px;
+        overflow: auto;
+      }
+
+      .hide {
+        display: none !important;
+      }
+
+      @media (max-width: 900px) {
+        body {
+          grid-template-columns: 1fr;
+        }
+        aside {
+          max-height: none;
+          border-right: none;
+          border-bottom: 1px solid var(--border);
+          order: 2;
+        }
+        main {
+          order: 1;
+          padding: 14px;
+        }
+      }
     </style>
   </head>
   <body>
     <aside>
       <div>
-        <h1>Pixelmaps</h1>
-        <p class="subtitle">Tile cartograms from geography + a data weight.</p>
+        <div class="brand">
+          <h1>desipix</h1>
+          <button
+            id="theme"
+            class="icon-btn"
+            type="button"
+            title="Canvia el tema"
+            aria-label="Canvia el tema"
+          >
+            ◐
+          </button>
+        </div>
+        <p class="tagline">
+          Cartogrames de blocs. La <b>mida</b> mostra el pes de cada regió; el
+          <b>color</b>, l'indicador.
+        </p>
       </div>
 
-      <div>
+      <div class="field">
         <label for="geography">Geografia</label>
         <select id="geography">
-          <option value="spain">Espanya (CCAA)</option>
-          <option value="catalonia">Catalunya (comarques)</option>
-          <option value="europe">Europa (NUTS-2)</option>
+          <option value="spain">Espanya · comunitats</option>
+          <option value="catalonia">Catalunya · comarques</option>
+          <option value="europe">Europa · NUTS-2</option>
         </select>
       </div>
 
-      <div>
-        <label for="dataset">Dataset</label>
+      <div class="field">
+        <label for="dataset">Indicador (color)</label>
         <select id="dataset"></select>
       </div>
 
-      <div>
+      <div class="field" id="weightField">
+        <label for="weight">Mida dels blocs</label>
+        <select id="weight"></select>
+      </div>
+
+      <div class="field">
         <label for="year">Any</label>
         <select id="year"></select>
       </div>
 
-      <div>
-        <label>Mode</label>
-        <div id="modePicker" style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px;">
-          <button type="button" data-mode="cartogram" class="modeBtn active">Equilibrat</button>
-          <button type="button" data-mode="dorling" class="modeBtn">Diferències</button>
-          <button type="button" data-mode="scaled" class="modeBtn">Escalat</button>
+      <div class="field" id="modeField">
+        <span class="field-label">Forma</span>
+        <div class="seg" id="modePicker">
+          <button type="button" data-mode="tiles" aria-pressed="true">Blocs</button>
+          <button type="button" data-mode="dorling" aria-pressed="false">Cercles</button>
+          <button type="button" data-mode="scaled" aria-pressed="false">Escalat</button>
         </div>
       </div>
 
-      <div id="tilesRow">
+      <div class="field" id="tilesField">
         <label for="tiles">Blocs totals: <span id="tilesLabel">1000</span></label>
-        <input id="tiles" type="range" min="200" max="5000" step="50" value="1000" />
+        <input id="tiles" type="range" min="300" max="4000" step="100" value="1000" />
       </div>
 
-      <div>
-        <label class="row" style="gap: 6px; align-items: center; font-weight: 600;">
-          <input id="showCities" type="checkbox" checked style="width: auto; flex: 0;" />
-          Marca capitals (color fosc)
-        </label>
+      <div class="field" id="trendField">
+        <span class="field-label">Escala</span>
+        <div class="seg" id="trendMode">
+          <button type="button" data-trend="indexed" aria-pressed="true">Índex 100</button>
+          <button type="button" data-trend="absolute" aria-pressed="false">Absolut</button>
+        </div>
       </div>
 
-      <div class="stat" id="tileMeta"></div>
-
-      <div class="row">
-        <button id="download">Exporta PNG</button>
+      <div class="field" id="highlightField">
+        <span class="field-label">Regions destacades</span>
+        <div class="region-picker" id="highlightPicker"></div>
       </div>
 
-      <div>
-        <label>Legend</label>
-        <div class="legend" id="legend"></div>
+      <div class="field" id="legendField">
+        <span class="field-label" id="legendTitle">Escala de color</span>
+        <div class="swatches" id="swatches"></div>
+        <div class="scale-ends"><span id="scaleLo"></span><span id="scaleHi"></span></div>
       </div>
 
-      <p class="stat" id="status"></p>
+      <button id="download" class="ghost" type="button">Exporta PNG</button>
+
+      <p class="note" id="sourceNote"></p>
     </aside>
 
     <main>
-      <svg id="stage" viewBox="0 0 900 800" xmlns="http://www.w3.org/2000/svg"></svg>
+      <div class="views" role="tablist">
+        <button type="button" data-view="map" aria-pressed="true">Mapa</button>
+        <button type="button" data-view="trend" aria-pressed="false">Evolució</button>
+        <button type="button" data-view="ranking" aria-pressed="false">Rànquing</button>
+      </div>
+
+      <div class="canvas" id="canvas">
+        <div class="spinner">Calculant…</div>
+        <svg
+          id="stage"
+          viewBox="0 0 900 780"
+          xmlns="http://www.w3.org/2000/svg"
+          role="img"
+          aria-labelledby="stageTitle"
+        >
+          <title id="stageTitle">Cartograma</title>
+        </svg>
+      </div>
+
+      <div class="readout" id="readout"></div>
+
+      <details>
+        <summary>Veure les dades en una taula</summary>
+        <div class="table-wrap"><table id="dataTable"></table></div>
+      </details>
     </main>
 
+    <div id="tooltip" role="status" aria-live="polite"></div>
     <script type="module" src="./src/main.js"></script>
   </body>
 </html>

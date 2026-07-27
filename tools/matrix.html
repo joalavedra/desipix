@@ -1,0 +1,85 @@
+<!doctype html><meta charset="utf-8"><title>matrix</title><body><pre id="out">running…</pre>
+<script type="module">
+import * as cg from "../src/cartogram.js";
+const GEO = {
+  spain:     { g:"../data/spain-ccaa.geojson",          d:"../data/spain-datasets.json",     p:cg.spainProjection,     t:1000 },
+  catalonia: { g:"../data/catalonia-comarques.geojson", d:"../data/catalonia-datasets.json", p:cg.cataloniaProjection, t:1500 },
+  europe:    { g:"../data/europe-nuts2.geojson",        d:"../data/europe-datasets.json",    p:cg.europeProjection,    t:2500 },
+};
+const problems = [], notes = [];
+for (const [name, cfg] of Object.entries(GEO)) {
+  const [geojson, meta] = await Promise.all([fetch(cfg.g).then(r=>r.json()), fetch(cfg.d).then(r=>r.json())]);
+  const regionIds = Object.keys(meta.regions.labels);
+  const counts = Object.keys(meta.datasets).filter(k=>meta.datasets[k].kind==="count");
+
+  for (const [key, ds] of Object.entries(meta.datasets)) {
+    const years = Object.keys(ds.values).sort();
+    // 1. schema completeness
+    for (const f of ["label","unit","kind","decimals","source","sourceUrl"])
+      if (ds[f] === undefined) problems.push(`${name}/${key}: missing field ${f}`);
+    if (!["count","rate","currency","index"].includes(ds.kind))
+      problems.push(`${name}/${key}: bad kind ${ds.kind}`);
+    // 2. value sanity
+    for (const y of years) {
+      for (const [rid, v] of Object.entries(ds.values[y])) {
+        if (!regionIds.includes(rid)) problems.push(`${name}/${key}/${y}: unknown region ${rid}`);
+        if (!Number.isFinite(v)) problems.push(`${name}/${key}/${y}/${rid}: non-finite ${v}`);
+        if (ds.kind === "count" && v < 0) problems.push(`${name}/${key}/${y}/${rid}: negative count ${v}`);
+      }
+    }
+    // 3. trend view: mirror chart.js chooseBaseYear and check what survives
+    if (years.length >= 2) {
+      const countAt = y => regionIds.filter(r => Number.isFinite(ds.values[y]?.[r])).length;
+      const withLast = countAt(years.at(-1));
+      const base = years.find(y => countAt(y) >= withLast * 0.9)
+        ?? years.reduce((b,y)=>countAt(y)>countAt(b)?y:b, years[0]);
+      const withBase = countAt(base);
+      if (withBase < withLast * 0.85)
+        problems.push(`${name}/${key}: indexed trend drops regions — base ${base} has ${withBase}, latest has ${withLast}`);
+      else if (base !== years[0])
+        notes.push(`${name}/${key}: trend base moved ${years[0]}→${base} for coverage (${withBase}/${withLast})`);
+    } else {
+      notes.push(`${name}/${key}: single year (${years[0]}) — trend view shows a message`);
+    }
+    // 4. weight/indicator year overlap, as main.js computes it
+    for (const w of counts) {
+      const shared = years.filter(y => meta.datasets[w].values[y]);
+      if (shared.length === 0)
+        problems.push(`${name}/${key}: no shared year with weight ${w} — map would size and colour different years`);
+    }
+  }
+
+  // 5. every count dataset must be usable as a weight in the allocator
+  for (const w of counts) {
+    const y = Object.keys(meta.datasets[w].values).sort().at(-1);
+    const res = cg.buildCartogram({ geojson, values: meta.datasets[w].values[y],
+      regionKey: meta.regions.key, totalTiles: cfg.t, width:900, height:800, projection: cfg.p });
+    const e = res.allocationError;
+    if (e.mean > 5) problems.push(`${name}: weight=${w} allocation error ${e.mean.toFixed(1)}%`);
+    if (res.cells.length < cfg.t * 0.97) problems.push(`${name}: weight=${w} lost tiles ${res.cells.length}/${cfg.t}`);
+    // contiguity: each region should be one connected blob
+    const byR = new Map();
+    for (const c of res.cells) { if(!byR.has(c.regionId)) byR.set(c.regionId,[]); byR.get(c.regionId).push(c); }
+    let fragmented = 0; const fragNames = [];
+    for (const [rid, cells] of byR) {
+      const own = new Set(cells.map(c=>`${c.col},${c.row}`)); const seen = new Set();
+      let comps = 0;
+      for (const c of cells) {
+        const k0=`${c.col},${c.row}`; if (seen.has(k0)) continue; comps++;
+        const st=[c]; seen.add(k0);
+        while(st.length){ const q=st.pop();
+          for (const [dc,dr] of [[1,0],[-1,0],[0,1],[0,-1]]) { const k=`${q.col+dc},${q.row+dr}`;
+            if(own.has(k)&&!seen.has(k)){seen.add(k); st.push({col:q.col+dc,row:q.row+dr});} } }
+      }
+      if (comps > 1) { fragmented++; fragNames.push(`${meta.regions.labels[rid]}(${comps})`); }
+    }
+    if (fragmented > byR.size * 0.15)
+      problems.push(`${name}: weight=${w} ${fragmented}/${byR.size} regions fragmented into multiple blobs`);
+    else if (fragmented) notes.push(`${name}: weight=${w} ${fragmented}/${byR.size} in >1 blob: ${fragNames.slice(0,12).join(", ")}`);
+  }
+}
+document.getElementById("out").textContent =
+  `PROBLEMS (${problems.length}):\n` + (problems.map(p=>"  ✗ "+p).join("\n")||"  none") +
+  `\n\nNOTES (${notes.length}):\n` + (notes.map(n=>"  · "+n).join("\n")||"  none");
+window.__done = true;
+</script></body>

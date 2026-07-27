@@ -1,777 +1,561 @@
-import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
-import { buildCartogram, spainProjection, europeProjection, cataloniaProjection } from "./cartogram.js";
-
-const W = 900;
-const H = 800;
+import { cataloniaProjection, europeProjection, spainProjection } from "./cartogram.js";
+import { CH, CW, drawRanking, drawTrend } from "./chart.js";
+import { aggregate, formatCompact, formatValue } from "./format.js";
+import { H, W, drawDorling, drawScaled, drawTileMap } from "./map.js";
+import { CATEGORICAL, isDark, scaleFor, token } from "./palette.js";
 
 const GEOGRAPHIES = {
   spain: {
-    label: "Espanya",
+    title: "Espanya",
     geojson: "./data/spain-ccaa.geojson",
     datasets: "./data/spain-datasets.json",
     projection: spainProjection,
-    title: "Espanya",
-    insetLabel: "Canàries",
-    showInsetFrame: true,
-    cartogramTiles: 1000,
-  },
-  europe: {
-    label: "Europa",
-    geojson: "./data/europe-nuts2.geojson",
-    datasets: "./data/europe-datasets.json",
-    projection: europeProjection,
-    title: "Europa",
-    insetLabel: null,
-    showInsetFrame: false,
-    cartogramTiles: 2500,
+    tiles: 1000,
   },
   catalonia: {
-    label: "Catalunya",
+    title: "Catalunya",
     geojson: "./data/catalonia-comarques.geojson",
     datasets: "./data/catalonia-datasets.json",
     projection: cataloniaProjection,
-    title: "Catalunya",
-    insetLabel: null,
-    showInsetFrame: false,
-    cartogramTiles: 1500,
+    tiles: 1500,
+  },
+  europe: {
+    title: "Europa",
+    geojson: "./data/europe-nuts2.geojson",
+    datasets: "./data/europe-datasets.json",
+    projection: europeProjection,
+    tiles: 2500,
   },
 };
 
 const $ = (id) => document.getElementById(id);
-const state = { geographyKey: "spain", geojson: null, meta: null, mode: "cartogram" };
+
+const state = {
+  geography: "spain",
+  dataset: null,
+  weight: null,
+  year: null,
+  mode: "tiles",
+  view: "map",
+  trend: "indexed",
+  highlight: [],
+  geojson: null,
+  meta: null,
+};
+
+// ---- URL state ------------------------------------------------------------
+
+const URL_KEYS = ["geography", "dataset", "weight", "year", "mode", "view", "trend"];
+
+function readUrl() {
+  const params = new URLSearchParams(location.hash.slice(1));
+  for (const k of URL_KEYS) {
+    const v = params.get(k);
+    if (v) state[k] = v;
+  }
+  const h = params.get("highlight");
+  if (h) state.highlight = h.split(",").filter(Boolean);
+}
+
+function writeUrl() {
+  const params = new URLSearchParams();
+  for (const k of URL_KEYS) if (state[k]) params.set(k, state[k]);
+  if (state.highlight.length) params.set("highlight", state.highlight.join(","));
+  history.replaceState(null, "", `#${params}`);
+}
+
+// ---- Loading --------------------------------------------------------------
 
 async function loadGeography(key) {
   const g = GEOGRAPHIES[key];
-  const [geo, meta] = await Promise.all([
+  const [geojson, meta] = await Promise.all([
     fetch(g.geojson).then((r) => r.json()),
     fetch(g.datasets).then((r) => r.json()),
   ]);
-  state.geographyKey = key;
-  state.geojson = geo;
+  state.geography = key;
+  state.geojson = geojson;
   state.meta = meta;
 
-  // Reset slider to geography's default tile count
-  const slider = $("tiles");
-  slider.value = g.cartogramTiles;
-  $("tilesLabel").textContent = g.cartogramTiles;
-
-  const dsEl = $("dataset");
-  dsEl.innerHTML = "";
-  for (const [k, v] of Object.entries(meta.datasets)) {
-    const opt = document.createElement("option");
-    opt.value = k;
-    opt.textContent = v.label;
-    dsEl.appendChild(opt);
+  const keys = Object.keys(meta.datasets);
+  const weights = weightCandidates(meta);
+  if (!weights.includes(state.weight)) state.weight = weights[0];
+  // Default the fill to something other than the weight, so the map opens
+  // showing two variables rather than the same one twice.
+  if (!keys.includes(state.dataset)) {
+    state.dataset = keys.find((k) => k !== state.weight) || keys[0];
   }
 
-  refreshYearOptions();
-  renderLegend();
+  fillSelect($("dataset"), keys, (k) => meta.datasets[k].label, state.dataset);
+  fillSelect($("weight"), weights, (k) => meta.datasets[k].label, state.weight);
+
+  $("tiles").value = g.tiles;
+  $("tilesLabel").textContent = g.tiles;
+
+  refreshYears();
+  buildHighlightPicker();
   render();
 }
 
-function refreshYearOptions() {
-  const dsKey = $("dataset").value;
-  const ds = state.meta.datasets[dsKey];
-  const years = Object.keys(ds.values || {}).sort();
-  const yearEl = $("year");
-  const prev = yearEl.value;
-  yearEl.innerHTML = "";
-  for (const y of years) {
-    const opt = document.createElement("option");
-    opt.value = y;
-    opt.textContent = y;
-    yearEl.appendChild(opt);
-  }
-  if (years.includes(prev)) yearEl.value = prev;
-  else if (years.length) yearEl.value = years[years.length - 1];
-  yearEl.disabled = years.length <= 1;
+/** Only counts can size a mark; sizing tiles by a rate would be meaningless. */
+function weightCandidates(meta) {
+  const counts = Object.keys(meta.datasets).filter((k) => meta.datasets[k].kind === "count");
+  return counts.length ? counts : Object.keys(meta.datasets);
 }
 
-async function init() {
-  await loadGeography("spain");
+function fillSelect(select, values, label, selected) {
+  select.innerHTML = "";
+  for (const v of values) {
+    const opt = document.createElement("option");
+    opt.value = v;
+    opt.textContent = label(v);
+    select.appendChild(opt);
+  }
+  select.value = selected;
+}
 
-  $("geography").addEventListener("change", (e) => loadGeography(e.target.value));
-  $("dataset").addEventListener("change", () => { refreshYearOptions(); render(); });
-  $("year").addEventListener("change", render);
-  $("showCities").addEventListener("change", render);
-  $("download").addEventListener("click", downloadPng);
-  $("tiles").addEventListener("input", (e) => {
-    $("tilesLabel").textContent = e.target.value;
-  });
-  $("tiles").addEventListener("change", render);
+/**
+ * Offer only years where both the indicator and the weight have data, so the
+ * map can never show a fill with nothing sized under it.
+ */
+function refreshYears() {
+  const indicator = state.meta.datasets[state.dataset];
+  const weight = state.meta.datasets[state.weight];
+  const shared = Object.keys(indicator.values)
+    .filter((y) => weight.values[y])
+    .sort();
+  const years = shared.length ? shared : Object.keys(indicator.values).sort();
 
-  document.querySelectorAll(".modeBtn").forEach((btn) => {
+  fillSelect($("year"), years, (y) => y, years.includes(state.year) ? state.year : years.at(-1));
+  state.year = $("year").value;
+  $("year").disabled = years.length <= 1;
+}
+
+function buildHighlightPicker() {
+  const picker = $("highlightPicker");
+  picker.innerHTML = "";
+  const labels = state.meta.regions.labels;
+  const ranked = rankRegions();
+
+  state.highlight = state.highlight.filter((id) => labels[id]);
+  if (state.highlight.length === 0) state.highlight = ranked.slice(0, 3);
+
+  const colours = CATEGORICAL[isDark() ? "dark" : "light"];
+  for (const id of ranked.slice(0, 24)) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "chip";
+    const on = state.highlight.includes(id);
+    btn.setAttribute("aria-pressed", String(on));
+    if (on) btn.style.background = colours[state.highlight.indexOf(id) % colours.length];
+    btn.textContent = labels[id];
     btn.addEventListener("click", () => {
-      document.querySelectorAll(".modeBtn").forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      state.mode = btn.dataset.mode;
-      updateTilesRowVisibility();
+      const i = state.highlight.indexOf(id);
+      if (i === -1) {
+        if (state.highlight.length >= 4) state.highlight.shift();
+        state.highlight.push(id);
+      } else {
+        state.highlight.splice(i, 1);
+      }
+      buildHighlightPicker();
       render();
     });
-  });
-  updateTilesRowVisibility();
-}
-
-function updateTilesRowVisibility() {
-  const row = $("tilesRow");
-  if (!row) return;
-  row.style.display = state.mode === "cartogram" ? "" : "none";
-}
-
-function renderLegend() {
-  const wrap = $("legend");
-  wrap.innerHTML = "";
-  const { labels, colors, countries, countryNames } = state.meta.regions;
-  const ids = Object.keys(labels);
-
-  if (countries && ids.length > 50) {
-    wrap.style.gridTemplateColumns = "1fr";
-    const seen = new Set();
-    for (const id of ids) {
-      const c = countries[id];
-      if (seen.has(c)) continue;
-      seen.add(c);
-      const row = document.createElement("div");
-      const sw = document.createElement("span");
-      sw.className = "sw";
-      sw.style.background = colors[id];
-      row.appendChild(sw);
-      const t = document.createElement("span");
-      t.textContent = (countryNames && countryNames[c]) || c;
-      row.appendChild(t);
-      wrap.appendChild(row);
-    }
-    return;
-  }
-
-  wrap.style.gridTemplateColumns = "1fr 1fr";
-  for (const id of ids) {
-    const row = document.createElement("div");
-    const sw = document.createElement("span");
-    sw.className = "sw";
-    sw.style.background = colors[id] || "#999";
-    row.appendChild(sw);
-    const t = document.createElement("span");
-    t.textContent = labels[id];
-    row.appendChild(t);
-    wrap.appendChild(row);
+    picker.appendChild(btn);
   }
 }
+
+/** Regions ordered by weight, so the picker leads with the ones that matter. */
+function rankRegions() {
+  const weight = state.meta.datasets[state.weight];
+  const year = Object.keys(weight.values).sort().at(-1);
+  const slice = weight.values[year] || {};
+  return Object.keys(state.meta.regions.labels).sort(
+    (a, b) => (slice[b] || 0) - (slice[a] || 0)
+  );
+}
+
+// ---- Render ---------------------------------------------------------------
+
+let renderToken = 0;
 
 function render() {
   if (!state.meta) return;
-  const dsKey = $("dataset").value;
-  const year = $("year").value;
-  const ds = state.meta.datasets[dsKey];
-  if (!ds) return;
-  const values = ds.values[year];
-  if (!values) return;
-  const geog = GEOGRAPHIES[state.geographyKey];
+  writeUrl();
+  syncControls();
 
-  // population denom for city share
-  const popDs = state.meta.datasets.population;
-  let populationByRegion = values;
-  if (popDs && popDs.values) {
-    const popYears = Object.keys(popDs.values).sort();
-    populationByRegion = popDs.values[popYears[popYears.length - 1]] || values;
-  }
+  const canvas = $("canvas");
+  canvas.dataset.busy = "true";
+  const ticket = ++renderToken;
 
-  const t0 = performance.now();
-  const svg = $("stage");
-  svg.innerHTML = "";
-
-  if (state.mode === "dorling") {
-    drawDorling({ values, ds, year, geog });
-  } else if (state.mode === "scaled") {
-    drawScaled({ values, ds, year, geog });
-  } else {
-    drawCartogramMode({ values, ds, year, populationByRegion, geog });
-  }
-
-  const elapsed = (performance.now() - t0).toFixed(0);
-  const totalValue = Object.values(values).reduce((a, b) => a + b, 0);
-  $("status").textContent = `Total: ${formatNum(totalValue)} ${ds.unit}  ·  ${elapsed}ms`;
-  const tileCount = +$("tiles").value || geog.cartogramTiles;
-  $("tileMeta").textContent = ({
-    cartogram: `Cartograma · 1 bloc ≈ ${formatNum(totalValue / tileCount)} ${ds.unit} · diferències amplificades`,
-    dorling: "Dorling (1 cercle per regió, mida = valor)",
-    scaled: "Escalat · formes reals, mida ∝ valor",
-  })[state.mode] || "";
-}
-
-// ---- Mode 1: Choropleth ----
-
-function drawChoropleth({ values, ds, year, geog }) {
-  const svg = $("stage");
-  const ns = "http://www.w3.org/2000/svg";
-  const { colors, labels, cities } = state.meta.regions;
-  const regionKey = state.meta.regions.key;
-  const { project } = geog.projection(state.geojson, W, H);
-
-  drawTitle(svg, ns, geog, ds, year);
-
-  // Color scale: sqrt of value → opacity multiplier on the region's base color
-  const vals = Object.values(values).filter((v) => v > 0);
-  const vMax = Math.max(...vals);
-  const scale = (v) => Math.sqrt((v || 0) / vMax); // 0..1
-
-  for (const f of state.geojson.features) {
-    const id = f.properties[regionKey];
-    const base = colors[id] || "#999";
-    const t = scale(values[id]);
-    const fill = mixColor("#f4f4f1", base, 0.15 + 0.85 * t);
-    const d = featureToPath(f.geometry, project);
-    if (!d) continue;
-    const p = document.createElementNS(ns, "path");
-    p.setAttribute("d", d);
-    p.setAttribute("fill", fill);
-    p.setAttribute("stroke", "#fff");
-    p.setAttribute("stroke-width", "0.5");
-    svg.appendChild(p);
-  }
-
-  // City markers + region labels
-  const showCities = $("showCities").checked;
-  for (const f of state.geojson.features) {
-    const id = f.properties[regionKey];
-    const c = featureCentroid(f.geometry, project);
-    if (!c) continue;
-    addLabel(svg, ns, c[0], c[1], 11, labels[id] || id);
-    if (showCities && cities && cities[id]) {
-      const p = project([cities[id].lon, cities[id].lat]);
-      if (p && isFinite(p[0])) {
-        const dot = document.createElementNS(ns, "circle");
-        dot.setAttribute("cx", p[0]);
-        dot.setAttribute("cy", p[1]);
-        dot.setAttribute("r", 3);
-        dot.setAttribute("fill", "#000");
-        svg.appendChild(dot);
-      }
+  // Yield once so the browser paints the busy state before the allocator
+  // blocks the main thread.
+  requestAnimationFrame(() => {
+    if (ticket !== renderToken) return;
+    try {
+      if (state.view === "map") renderMap();
+      else renderChart();
+    } finally {
+      canvas.dataset.busy = "false";
     }
-  }
-
-  drawInsetFrame(svg, ns, geog);
-}
-
-// ---- Mode 2: Cartogram (existing) ----
-
-function drawCartogramMode({ values, ds, year, populationByRegion, geog }) {
-  const EXAGGERATE = 1.4;
-  const exaggerated = {};
-  for (const [k, v] of Object.entries(values)) {
-    exaggerated[k] = v > 0 ? Math.pow(v, EXAGGERATE) : 0;
-  }
-
-  const result = buildCartogram({
-    geojson: state.geojson,
-    values: exaggerated,
-    regionKey: state.meta.regions.key,
-    totalTiles: +$("tiles").value,
-    width: W,
-    height: H,
-    projection: geog.projection,
-    cities: state.meta.regions.cities,
   });
-  drawCartogramSvg(result, ds, year, populationByRegion, geog);
 }
 
-function drawCartogramSvg({ cells, tileSide, tileValue }, ds, year, values, geog) {
+function currentSlice() {
+  const dataset = state.meta.datasets[state.dataset];
+  const weightSet = state.meta.datasets[state.weight];
+  const values = dataset.values[state.year] || {};
+  const weightYear = weightSet.values[state.year]
+    ? state.year
+    : Object.keys(weightSet.values).sort().at(-1);
+  return { dataset, weightSet, values, weights: weightSet.values[weightYear] || {} };
+}
+
+function renderMap() {
   const svg = $("stage");
-  const ns = "http://www.w3.org/2000/svg";
-  const { colors, labels, countries, cities } = state.meta.regions;
-  const { project } = geog.projection(state.geojson, W, H);
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.innerHTML = "<title></title>";
 
-  drawTitle(svg, ns, geog, ds, year);
+  const { dataset, weightSet, values, weights } = currentSlice();
+  const scale = scaleFor(dataset, Object.values(values));
 
-  const showCities = $("showCities").checked;
-  const cityCells = (showCities && cities)
-    ? pickCityCells(cells, cities, values, project)
-    : new Set();
+  const ctx = {
+    svg,
+    geojson: state.geojson,
+    meta: state.meta,
+    dataset,
+    values,
+    weights,
+    scale,
+    projection: GEOGRAPHIES[state.geography].projection,
+    tiles: +$("tiles").value,
+  };
 
-  const byRegion = new Map();
-  for (const c of cells) {
-    if (!byRegion.has(c.regionId)) byRegion.set(c.regionId, []);
-    byRegion.get(c.regionId).push(c);
-  }
+  const started = performance.now();
+  drawHeading(
+    svg,
+    W,
+    `${GEOGRAPHIES[state.geography].title}: ${dataset.label}`,
+    `${state.year} · mida = ${weightSet.label.toLowerCase()}`
+  );
 
-  const gap = Math.min(0.5, tileSide * 0.06);
-  for (const [regionId, regionCells] of byRegion) {
-    const base = colors[regionId] || "#999";
-    const dark = darkenHex(base);
-    const gLight = document.createElementNS(ns, "g");
-    gLight.setAttribute("fill", base);
-    const gDark = document.createElementNS(ns, "g");
-    gDark.setAttribute("fill", dark);
-    let dCount = 0;
-    for (const c of regionCells) {
-      const r = document.createElementNS(ns, "rect");
-      r.setAttribute("x", c.x - tileSide / 2 + gap / 2);
-      r.setAttribute("y", c.y - tileSide / 2 + gap / 2);
-      r.setAttribute("width", tileSide - gap);
-      r.setAttribute("height", tileSide - gap);
-      if (cityCells.has(c)) { gDark.appendChild(r); dCount++; }
-      else gLight.appendChild(r);
-    }
-    svg.appendChild(gLight);
-    if (dCount > 0) svg.appendChild(gDark);
-  }
+  let result = {};
+  if (state.mode === "dorling") result = drawDorling(ctx);
+  else if (state.mode === "scaled") result = drawScaled(ctx);
+  else result = drawTileMap(ctx);
 
-  // Region labels — suppress when a city has same name
-  if (countries && byRegion.size > 50) {
-    const { countryNames } = state.meta.regions;
-    const byCountry = new Map();
-    for (const [regionId, regionCells] of byRegion) {
-      const c = countries[regionId];
-      if (!byCountry.has(c)) byCountry.set(c, []);
-      byCountry.get(c).push(...regionCells);
-    }
-    for (const [country, ccells] of byCountry) {
-      if (ccells.length < 3) continue;
-      const cx = ccells.reduce((s, c) => s + c.x, 0) / ccells.length;
-      const cy = ccells.reduce((s, c) => s + c.y, 0) / ccells.length;
-      const fs = Math.max(9, Math.min(18, Math.sqrt(ccells.length) * 1.1));
-      addLabel(svg, ns, cx, cy, fs, (countryNames && countryNames[country]) || country);
-    }
+  drawFootnote(svg, H, dataset);
+  const elapsed = Math.round(performance.now() - started);
+
+  attachHover(svg, values, dataset, weights, weightSet);
+  paintLegend(scale, dataset);
+  paintReadout(values, dataset, weights, elapsed, result);
+  paintTable(values, dataset, weights, weightSet);
+  svg.querySelector("title").textContent =
+    `${dataset.label}, ${state.year}, per ${GEOGRAPHIES[state.geography].title}`;
+}
+
+function renderChart() {
+  const svg = $("stage");
+  svg.setAttribute("viewBox", `0 0 ${CW} ${CH}`);
+  svg.innerHTML = "<title></title>";
+  const { dataset, values, weights, weightSet } = currentSlice();
+  const title = `${GEOGRAPHIES[state.geography].title}: ${dataset.label}`;
+
+  if (state.view === "trend") {
+    drawTrend({
+      svg,
+      dataset,
+      labels: state.meta.regions.labels,
+      highlight: state.highlight,
+      indexed: state.trend === "indexed",
+      title,
+    });
+    svg.querySelector("title").textContent = `Evolució de ${dataset.label}`;
   } else {
-    for (const [regionId, regionCells] of byRegion) {
-      if (regionCells.length < 4) continue;
-      const label = labels[regionId] || regionId;
-      const cityName = cities && cities[regionId] && cities[regionId].name;
-      if (cityName && cityName.toLowerCase() === label.toLowerCase()) continue;
-      const cx = regionCells.reduce((s, c) => s + c.x, 0) / regionCells.length;
-      const cy = regionCells.reduce((s, c) => s + c.y, 0) / regionCells.length;
-      const fs = Math.max(9, Math.min(15, Math.sqrt(regionCells.length) * 1.4));
-      addLabel(svg, ns, cx, cy, fs, label);
-    }
-  }
-
-  // City labels
-  if (showCities && cities) {
-    const cityGroups = new Map();
-    for (const cell of cityCells) {
-      if (!cityGroups.has(cell.regionId)) cityGroups.set(cell.regionId, []);
-      cityGroups.get(cell.regionId).push(cell);
-    }
-    for (const [regionId, cluster] of cityGroups) {
-      if (cluster.length === 0) continue;
-      const city = cities[regionId];
-      if (!city) continue;
-      const cx = cluster.reduce((s, c) => s + c.x, 0) / cluster.length;
-      const cy = cluster.reduce((s, c) => s + c.y, 0) / cluster.length;
-      const fs = Math.max(8, Math.min(11, Math.sqrt(cluster.length) * 1.4));
-      addLabel(svg, ns, cx, cy, fs, city.name, "#fff", "#000");
-    }
-  }
-
-  drawInsetFrame(svg, ns, geog);
-}
-
-// ---- Mode 3: Dorling ----
-
-function drawDorling({ values, ds, year, geog }) {
-  const svg = $("stage");
-  const ns = "http://www.w3.org/2000/svg";
-  const { colors, labels, countries, cities } = state.meta.regions;
-  const regionKey = state.meta.regions.key;
-  const { project } = geog.projection(state.geojson, W, H);
-
-  drawTitle(svg, ns, geog, ds, year);
-
-  // Build nodes: one per region with value > 0
-  const totalValue = Object.values(values).reduce((a, b) => a + b, 0);
-  // Target: circles fill ~38% of canvas area
-  const canvasArea = (W - 20) * (H - 80);
-  const areaScale = (canvasArea * 0.38) / totalValue;
-
-  const nodes = [];
-  for (const f of state.geojson.features) {
-    const id = f.properties[regionKey];
-    const v = values[id] || 0;
-    if (v <= 0) continue;
-    const c = featureCentroid(f.geometry, project);
-    if (!c) continue;
-    const r = Math.sqrt((v * areaScale) / Math.PI);
-    nodes.push({
-      id,
-      label: labels[id] || id,
-      cx: c[0],
-      cy: c[1],
-      x: c[0],
-      y: c[1],
-      r: Math.max(3, r),
-      color: colors[id] || "#999",
-      value: v,
+    drawRanking({
+      svg,
+      dataset,
+      labels: state.meta.regions.labels,
+      values,
+      title: `${title} (${state.year})`,
     });
+    attachHover(svg, values, dataset, weights, weightSet);
+    svg.querySelector("title").textContent = `Rànquing de ${dataset.label}, ${state.year}`;
   }
 
-  // Force layout to push circles apart while keeping near their geographic location
-  const sim = d3.forceSimulation(nodes)
-    .force("x", d3.forceX((d) => d.cx).strength(0.25))
-    .force("y", d3.forceY((d) => d.cy).strength(0.25))
-    .force("collide", d3.forceCollide((d) => d.r + 1).strength(1))
-    .stop();
-  for (let i = 0; i < 220; i++) sim.tick();
-
-  // Draw circles + labels
-  for (const n of nodes) {
-    const c = document.createElementNS(ns, "circle");
-    c.setAttribute("cx", n.x);
-    c.setAttribute("cy", n.y);
-    c.setAttribute("r", n.r);
-    c.setAttribute("fill", n.color);
-    c.setAttribute("stroke", "rgba(0,0,0,0.25)");
-    c.setAttribute("stroke-width", "0.5");
-    svg.appendChild(c);
-  }
-  // Labels only for big enough circles
-  const { countryNames } = state.meta.regions;
-  const manyRegions = nodes.length > 50;
-  for (const n of nodes) {
-    if (n.r < 9) continue;
-    const fs = Math.min(14, Math.max(8, n.r * 0.45));
-    let label = n.label;
-    if (manyRegions && countries && countries[n.id]) {
-      const code = countries[n.id];
-      label = (countryNames && countryNames[code]) || code;
-    }
-    addLabel(svg, ns, n.x, n.y, fs, label);
-  }
+  paintLegend(null, dataset);
+  paintReadout(values, dataset, weights, null, {});
+  paintTable(values, dataset, weights, weightSet);
 }
 
-// ---- Mode 4: Hex tilegram ----
-
-function drawHex({ values, ds, year, geog }) {
-  const svg = $("stage");
-  const ns = "http://www.w3.org/2000/svg";
-  const { colors, labels, countries, countryNames } = state.meta.regions;
-  const regionKey = state.meta.regions.key;
-  const { project } = geog.projection(state.geojson, W, H);
-
-  drawTitle(svg, ns, geog, ds, year);
-
-  // Hex radius scales with region count so they fit. Target ~50% coverage.
-  const regionCount = state.geojson.features.filter((f) => (values[f.properties[regionKey]] || 0) > 0).length;
-  const usableArea = (W - 40) * (H - 100);
-  const hexArea = usableArea * 0.55 / Math.max(1, regionCount);
-  const R = Math.sqrt(hexArea / ((3 * Math.sqrt(3)) / 2));
-
-  // Color scale: sqrt of value → opacity of base color
-  const vals = Object.values(values).filter((v) => v > 0);
-  const vMax = Math.max(...vals);
-
-  const nodes = [];
-  for (const f of state.geojson.features) {
-    const id = f.properties[regionKey];
-    const v = values[id] || 0;
-    if (v <= 0) continue;
-    const c = featureCentroid(f.geometry, project);
-    if (!c) continue;
-    nodes.push({
-      id,
-      label: labels[id] || id,
-      cx: c[0], cy: c[1], x: c[0], y: c[1],
-      r: R,
-      baseColor: colors[id] || "#999",
-      value: v,
-      intensity: Math.sqrt(v / vMax),
-    });
-  }
-
-  // Force layout: collide on circumradius (R), pull toward geographic centroid
-  const sim = d3.forceSimulation(nodes)
-    .force("x", d3.forceX((d) => d.cx).strength(0.35))
-    .force("y", d3.forceY((d) => d.cy).strength(0.35))
-    .force("collide", d3.forceCollide(R * 1.05).strength(1))
-    .stop();
-  for (let i = 0; i < 220; i++) sim.tick();
-
-  // Draw hexagons (flat-top)
-  for (const n of nodes) {
-    const fill = mixColor("#f4f4f1", n.baseColor, 0.2 + 0.8 * n.intensity);
-    const pts = [];
-    for (let i = 0; i < 6; i++) {
-      const a = (Math.PI / 3) * i;
-      pts.push(`${(n.x + R * Math.cos(a)).toFixed(1)},${(n.y + R * Math.sin(a)).toFixed(1)}`);
-    }
-    const p = document.createElementNS(ns, "polygon");
-    p.setAttribute("points", pts.join(" "));
-    p.setAttribute("fill", fill);
-    p.setAttribute("stroke", "white");
-    p.setAttribute("stroke-width", "1");
-    svg.appendChild(p);
-  }
-
-  // Labels — country code/name for many-region maps, full label otherwise
-  const manyRegions = nodes.length > 50;
-  for (const n of nodes) {
-    if (R < 8) continue;
-    const fs = Math.min(13, Math.max(8, R * 0.4));
-    let label = n.label;
-    if (manyRegions && countries && countries[n.id]) {
-      const code = countries[n.id];
-      label = (countryNames && countryNames[code]) || code;
-    }
-    addLabel(svg, ns, n.x, n.y, fs, label);
-  }
-}
-
-// ---- Mode 5: Non-contiguous scaled ----
-
-function drawScaled({ values, ds, year, geog }) {
-  const svg = $("stage");
-  const ns = "http://www.w3.org/2000/svg";
-  const { colors, labels, countries, countryNames } = state.meta.regions;
-  const regionKey = state.meta.regions.key;
-  const { project } = geog.projection(state.geojson, W, H);
-
-  drawTitle(svg, ns, geog, ds, year);
-
-  // Faded base map
-  for (const f of state.geojson.features) {
-    const d = featureToPath(f.geometry, project);
-    if (!d) continue;
-    const p = document.createElementNS(ns, "path");
-    p.setAttribute("d", d);
-    p.setAttribute("fill", "#ececea");
-    p.setAttribute("stroke", "#d4d4d0");
-    p.setAttribute("stroke-width", "0.4");
-    svg.appendChild(p);
-  }
-
-  // Scale = sqrt(value / max). Largest region renders at 100% of its real shape.
-  const vMax = Math.max(...Object.values(values).filter((v) => v > 0));
-
-  // Draw each region scaled around its centroid
-  for (const f of state.geojson.features) {
-    const id = f.properties[regionKey];
-    const v = values[id] || 0;
-    if (v <= 0) continue;
-    const c = featureCentroid(f.geometry, project);
-    if (!c) continue;
-    const scale = Math.sqrt(v / vMax);
-    const d = scaledFeatureToPath(f.geometry, project, c, scale);
-    if (!d) continue;
-    const p = document.createElementNS(ns, "path");
-    p.setAttribute("d", d);
-    p.setAttribute("fill", colors[id] || "#999");
-    p.setAttribute("stroke", "white");
-    p.setAttribute("stroke-width", "0.5");
-    p.setAttribute("opacity", "0.85");
-    svg.appendChild(p);
-  }
-
-  // Labels — only the biggest regions
-  const manyRegions = state.geojson.features.length > 50;
-  for (const f of state.geojson.features) {
-    const id = f.properties[regionKey];
-    const v = values[id] || 0;
-    if (v <= 0) continue;
-    const scale = Math.sqrt(v / vMax);
-    if (scale < 0.25) continue;
-    const c = featureCentroid(f.geometry, project);
-    if (!c) continue;
-    let label = labels[id] || id;
-    if (manyRegions && countries && countries[id]) {
-      const code = countries[id];
-      label = (countryNames && countryNames[code]) || code;
-    }
-    const fs = Math.max(9, Math.min(15, scale * 14));
-    addLabel(svg, ns, c[0], c[1], fs, label);
-  }
-}
-
-function scaledFeatureToPath(geom, project, [cx, cy], scale) {
-  const ringToPath = (ring) => {
-    const pts = ring.map((c) => {
-      const p = project(c);
-      if (!p || !isFinite(p[0])) return null;
-      return [cx + (p[0] - cx) * scale, cy + (p[1] - cy) * scale];
-    }).filter(Boolean);
-    if (pts.length < 3) return "";
-    return "M" + pts.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join("L") + "Z";
-  };
-  if (geom.type === "Polygon") return geom.coordinates.map(ringToPath).join(" ");
-  if (geom.type === "MultiPolygon") return geom.coordinates.map((poly) => poly.map(ringToPath).join(" ")).join(" ");
-  return "";
-}
-
-// ---- City picker (cartogram only) ----
-
-function pickCityCells(cells, cities, values, project) {
-  const cityCells = new Set();
-  const byRegion = new Map();
-  for (const c of cells) {
-    if (!byRegion.has(c.regionId)) byRegion.set(c.regionId, []);
-    byRegion.get(c.regionId).push(c);
-  }
-  for (const [regionId, regionCells] of byRegion) {
-    const city = cities[regionId];
-    if (!city) continue;
-    const regionPop = values[regionId] || 0;
-    if (regionPop === 0) continue;
-    const rawShare = city.population / regionPop;
-    const share = Math.min(0.4, rawShare * 0.65);
-    const n = Math.max(1, Math.round(share * regionCells.length));
-    const proj = project([city.lon, city.lat]);
-    if (!proj || !isFinite(proj[0])) continue;
-    regionCells.sort((a, b) => {
-      const da = (a.x - proj[0]) ** 2 + (a.y - proj[1]) ** 2;
-      const db = (b.x - proj[0]) ** 2 + (b.y - proj[1]) ** 2;
-      return da - db;
-    });
-    for (let i = 0; i < Math.min(n, regionCells.length); i++) {
-      cityCells.add(regionCells[i]);
-    }
-  }
-  return cityCells;
-}
-
-// ---- Helpers ----
-
-function featureToPath(geom, project) {
-  const ringToPath = (ring) => {
-    const pts = ring.map((c) => project(c)).filter((p) => p && isFinite(p[0]));
-    if (pts.length < 3) return "";
-    return "M" + pts.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join("L") + "Z";
-  };
-  if (geom.type === "Polygon") {
-    return geom.coordinates.map(ringToPath).join(" ");
-  }
-  if (geom.type === "MultiPolygon") {
-    return geom.coordinates.map((poly) => poly.map(ringToPath).join(" ")).join(" ");
-  }
-  return "";
-}
-
-function featureCentroid(geom, project) {
-  let sx = 0, sy = 0, n = 0;
-  const visit = (coords) => {
-    if (typeof coords[0] === "number") {
-      const p = project(coords);
-      if (p && isFinite(p[0])) { sx += p[0]; sy += p[1]; n++; }
-    } else for (const c of coords) visit(c);
-  };
-  visit(geom.coordinates);
-  if (n === 0) return null;
-  return [sx / n, sy / n];
-}
-
-function mixColor(a, b, t) {
-  const parse = (h) => {
-    const x = h.replace("#", "");
-    return [parseInt(x.substring(0,2),16), parseInt(x.substring(2,4),16), parseInt(x.substring(4,6),16)];
-  };
-  const [ar, ag, ab] = parse(a);
-  const [br, bg, bb] = parse(b);
-  const r = Math.round(ar + (br - ar) * t);
-  const g = Math.round(ag + (bg - ag) * t);
-  const bl = Math.round(ab + (bb - ab) * t);
-  return `#${r.toString(16).padStart(2,"0")}${g.toString(16).padStart(2,"0")}${bl.toString(16).padStart(2,"0")}`;
-}
-
-function darkenHex(hex, factor = 0.55) {
-  const h = hex.replace("#", "");
-  const r = parseInt(h.substring(0, 2), 16);
-  const g = parseInt(h.substring(2, 4), 16);
-  const b = parseInt(h.substring(4, 6), 16);
-  return `#${Math.round(r*factor).toString(16).padStart(2,"0")}${Math.round(g*factor).toString(16).padStart(2,"0")}${Math.round(b*factor).toString(16).padStart(2,"0")}`;
-}
-
-function drawTitle(svg, ns, geog, ds, year) {
-  const title = document.createElementNS(ns, "text");
-  title.setAttribute("x", W / 2);
-  title.setAttribute("y", 32);
-  title.setAttribute("text-anchor", "middle");
-  title.setAttribute("font-size", "22");
-  title.setAttribute("font-weight", "700");
-  title.setAttribute("font-family", "Georgia, serif");
-  title.textContent = `${geog.title}: ${ds.label}${year && year !== "—" ? " (" + year + ")" : ""}`;
-  svg.appendChild(title);
-
-  const sub = document.createElementNS(ns, "text");
-  sub.setAttribute("x", W / 2);
-  sub.setAttribute("y", 52);
-  sub.setAttribute("text-anchor", "middle");
-  sub.setAttribute("font-size", "11");
-  sub.setAttribute("fill", "#666");
-  sub.textContent = ({
-    cartogram: "Mode equilibrat · diferències amplificades",
-    dorling: "Mode diferències · cada cercle = una regió, mida = valor",
-    scaled: "Mode escalat · forma real, escalada pel valor",
-  })[state.mode] || "";
-  svg.appendChild(sub);
-}
-
-function drawInsetFrame(svg, ns, geog) {
-  if (!geog.showInsetFrame) return;
-  const insetTopY = H - H * 0.16 - 10;
-  const insetRightX = 10 + W * 0.22;
-  const line = (x1, y1, x2, y2) => {
-    const l = document.createElementNS(ns, "line");
-    l.setAttribute("x1", x1); l.setAttribute("y1", y1);
-    l.setAttribute("x2", x2); l.setAttribute("y2", y2);
-    l.setAttribute("stroke", "#ccc"); l.setAttribute("stroke-width", "1");
-    svg.appendChild(l);
-  };
-  line(10, insetTopY, insetRightX, insetTopY);
-  line(insetRightX, insetTopY, insetRightX, H - 10);
-  const lbl = document.createElementNS(ns, "text");
-  lbl.setAttribute("x", 14);
-  lbl.setAttribute("y", insetTopY - 4);
-  lbl.setAttribute("font-size", "10");
-  lbl.setAttribute("fill", "#666");
-  lbl.textContent = geog.insetLabel;
-  svg.appendChild(lbl);
-}
-
-function addLabel(svg, ns, cx, cy, fontSize, text, stroke = "white", fill = "#1a1a1a") {
-  const t = document.createElementNS(ns, "text");
-  t.setAttribute("x", cx);
-  t.setAttribute("y", cy);
-  t.setAttribute("text-anchor", "middle");
-  t.setAttribute("dominant-baseline", "middle");
-  t.setAttribute("font-size", fontSize);
-  t.setAttribute("font-weight", "700");
-  t.setAttribute("font-family", "Georgia, serif");
-  t.setAttribute("stroke", stroke);
-  t.setAttribute("stroke-width", "3");
-  t.setAttribute("stroke-linejoin", "round");
-  t.setAttribute("paint-order", "stroke");
+function svgText(x, y, size, weight, fill, content, anchor) {
+  const t = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  t.setAttribute("x", x);
+  t.setAttribute("y", y);
+  t.setAttribute("font-size", size);
+  t.setAttribute("font-weight", weight);
   t.setAttribute("fill", fill);
-  t.textContent = text;
-  svg.appendChild(t);
+  if (anchor) t.setAttribute("text-anchor", anchor);
+  t.textContent = content;
+  return t;
 }
 
-function formatNum(n) {
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
-  if (n >= 1_000) return (n / 1_000).toFixed(1) + "k";
-  return Math.round(n).toString();
+function drawHeading(svg, width, title, subtitle) {
+  svg.appendChild(svgText(width / 2, 26, "19", "700", token("--ink"), title, "middle"));
+  svg.appendChild(
+    svgText(width / 2, 45, "12", "400", token("--ink-secondary"), subtitle, "middle")
+  );
 }
 
-async function downloadPng() {
+/** Every export carries its own provenance. */
+function drawFootnote(svg, height, dataset) {
+  svg.appendChild(
+    svgText(10, height - 8, "10.5", "400", token("--ink-muted"),
+      `Font: ${dataset.source} · desipix`)
+  );
+}
+
+// ---- Hover ----------------------------------------------------------------
+
+function attachHover(svg, values, dataset, weights, weightSet) {
+  const tip = $("tooltip");
+  const labels = state.meta.regions.labels;
+  const ranked = Object.entries(values)
+    .filter(([, v]) => Number.isFinite(v))
+    .sort((a, b) => b[1] - a[1]);
+  const rankOf = new Map(ranked.map(([id], i) => [id, i + 1]));
+
+  const show = (id, event) => {
+    const rows = [
+      `<div class="t-row">${dataset.label}: ${formatValue(values[id], dataset)}</div>`,
+    ];
+    if (rankOf.has(id)) {
+      rows.push(`<div class="t-row">Posició ${rankOf.get(id)} de ${ranked.length}</div>`);
+    }
+    if (weightSet && state.view === "map") {
+      rows.push(
+        `<div class="t-row">${weightSet.label}: ${formatValue(weights[id], weightSet)}</div>`
+      );
+    }
+    tip.innerHTML = `<div class="t-name">${labels[id] || id}</div>${rows.join("")}`;
+    tip.dataset.show = "true";
+    const pad = 14;
+    const rect = tip.getBoundingClientRect();
+    let x = event.clientX + pad;
+    let y = event.clientY + pad;
+    if (x + rect.width > innerWidth - 8) x = event.clientX - rect.width - pad;
+    if (y + rect.height > innerHeight - 8) y = event.clientY - rect.height - pad;
+    tip.style.left = `${x}px`;
+    tip.style.top = `${y}px`;
+  };
+
+  svg.addEventListener("pointermove", (event) => {
+    const owner = event.target.closest("[data-region]");
+    if (!owner) {
+      tip.dataset.show = "false";
+      return;
+    }
+    show(owner.dataset.region, event);
+  });
+  svg.addEventListener("pointerleave", () => {
+    tip.dataset.show = "false";
+  });
+}
+
+// ---- Sidebar panels -------------------------------------------------------
+
+function paintLegend(scale, dataset) {
+  const field = $("legendField");
+  if (!scale || scale.bins.length === 0) {
+    field.classList.add("hide");
+    return;
+  }
+  field.classList.remove("hide");
+  $("legendTitle").textContent = dataset.label;
+  const wrap = $("swatches");
+  wrap.innerHTML = "";
+  for (const bin of scale.bins) {
+    const i = document.createElement("i");
+    i.style.background = bin.color;
+    i.title = `${formatCompact(bin.from, dataset)} – ${formatCompact(bin.to, dataset)}`;
+    wrap.appendChild(i);
+  }
+  $("scaleLo").textContent = formatCompact(scale.bins[0].from, dataset);
+  $("scaleHi").textContent = formatCompact(scale.bins.at(-1).to, dataset);
+}
+
+function paintReadout(values, dataset, weights, elapsed, result) {
+  const { value, label } = aggregate(values, dataset, weights);
+  const covered = Object.values(values).filter(Number.isFinite).length;
+  const total = Object.keys(state.meta.regions.labels).length;
+
+  const parts = [
+    `${label}: <b>${formatValue(value, dataset)}</b>`,
+    `Cobertura: <b>${covered}/${total}</b> regions`,
+  ];
+  if (result?.tileValue) {
+    const weightSet = state.meta.datasets[state.weight];
+    parts.push(
+      `1 bloc ≈ <b>${formatCompact(result.tileValue, weightSet)} ${weightSet.unit}</b>`
+    );
+  }
+  if (result?.allocationError?.n) {
+    parts.push(`Error d'assignació: <b>${result.allocationError.mean.toFixed(1)}%</b>`);
+  }
+  if (elapsed !== null && elapsed !== undefined) parts.push(`${elapsed} ms`);
+  $("readout").innerHTML = parts.map((p) => `<span>${p}</span>`).join("");
+
+  $("sourceNote").innerHTML =
+    `Font: ${dataset.source}. ` +
+    `<a href="${dataset.sourceUrl}" target="_blank" rel="noopener">Consulta l'origen</a>.`;
+}
+
+/** The table view is the colour-free twin: every value readable without hue. */
+function paintTable(values, dataset, weights, weightSet) {
+  const labels = state.meta.regions.labels;
+  const rank = (v) => (Number.isFinite(v) ? v : -Infinity);
+  const rows = Object.keys(labels)
+    .map((id) => ({ id, name: labels[id], v: values[id], w: weights[id] }))
+    .sort((a, b) => rank(b.v) - rank(a.v));
+
+  const head =
+    `<thead><tr><th>Regió</th><th class="num">${dataset.label}</th>` +
+    `<th class="num">${weightSet.label}</th></tr></thead>`;
+  const body = rows
+    .map(
+      (r) =>
+        `<tr><td>${r.name}</td><td class="num">${formatValue(r.v, dataset)}</td>` +
+        `<td class="num">${formatValue(r.w, weightSet)}</td></tr>`
+    )
+    .join("");
+  $("dataTable").innerHTML = `${head}<tbody>${body}</tbody>`;
+}
+
+function syncControls() {
+  const isMap = state.view === "map";
+  $("modeField").classList.toggle("hide", !isMap);
+  $("tilesField").classList.toggle("hide", !isMap || state.mode !== "tiles");
+  $("weightField").classList.toggle("hide", !isMap);
+  $("trendField").classList.toggle("hide", state.view !== "trend");
+  $("highlightField").classList.toggle("hide", state.view !== "trend");
+  $("year").closest(".field").classList.toggle("hide", state.view === "trend");
+
+  for (const b of document.querySelectorAll("[data-view]")) {
+    b.setAttribute("aria-pressed", String(b.dataset.view === state.view));
+  }
+  for (const b of document.querySelectorAll("[data-mode]")) {
+    b.setAttribute("aria-pressed", String(b.dataset.mode === state.mode));
+  }
+  for (const b of document.querySelectorAll("[data-trend]")) {
+    b.setAttribute("aria-pressed", String(b.dataset.trend === state.trend));
+  }
+}
+
+// ---- Export ---------------------------------------------------------------
+
+function downloadPng() {
   const svg = $("stage");
-  const xml = new XMLSerializer().serializeToString(svg);
-  const blob = new Blob([xml], { type: "image/svg+xml" });
-  const url = URL.createObjectURL(blob);
+  const clone = svg.cloneNode(true);
+  const [, , vw, vh] = svg.getAttribute("viewBox").split(" ").map(Number);
+  clone.setAttribute("width", vw);
+  clone.setAttribute("height", vh);
+
+  const style = document.createElementNS("http://www.w3.org/2000/svg", "style");
+  style.textContent = `text{font-family:system-ui,-apple-system,"Segoe UI",sans-serif}`;
+  clone.insertBefore(style, clone.firstChild);
+
+  const xml = new XMLSerializer().serializeToString(clone);
+  const url = URL.createObjectURL(new Blob([xml], { type: "image/svg+xml" }));
   const img = new Image();
   img.onload = () => {
     const scale = 2;
     const canvas = document.createElement("canvas");
-    canvas.width = W * scale;
-    canvas.height = H * scale;
+    canvas.width = vw * scale;
+    canvas.height = vh * scale;
     const ctx = canvas.getContext("2d");
-    ctx.fillStyle = "white";
+    ctx.fillStyle = token("--surface");
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
     URL.revokeObjectURL(url);
-    canvas.toBlob((b) => {
+    canvas.toBlob((blob) => {
       const a = document.createElement("a");
-      a.href = URL.createObjectURL(b);
-      a.download = `pixelmap-${state.geographyKey}-${state.mode}-${$("dataset").value}-${$("year").value}.png`;
+      a.href = URL.createObjectURL(blob);
+      a.download = `desipix-${state.geography}-${state.view}-${state.dataset}-${state.year}.png`;
       a.click();
+      URL.revokeObjectURL(a.href);
     }, "image/png");
   };
+  img.onerror = () => {
+    URL.revokeObjectURL(url);
+    $("readout").innerHTML = "<span>No s'ha pogut exportar la imatge.</span>";
+  };
   img.src = url;
+}
+
+// ---- Wiring ---------------------------------------------------------------
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem("desipix-theme", theme);
+}
+
+function init() {
+  const stored = localStorage.getItem("desipix-theme");
+  const prefersDark = matchMedia("(prefers-color-scheme: dark)").matches;
+  applyTheme(stored || (prefersDark ? "dark" : "light"));
+
+  readUrl();
+  $("geography").value = state.geography;
+
+  $("geography").addEventListener("change", (e) => {
+    state.highlight = [];
+    loadGeography(e.target.value);
+  });
+  $("dataset").addEventListener("change", (e) => {
+    state.dataset = e.target.value;
+    refreshYears();
+    render();
+  });
+  $("weight").addEventListener("change", (e) => {
+    state.weight = e.target.value;
+    refreshYears();
+    buildHighlightPicker();
+    render();
+  });
+  $("year").addEventListener("change", (e) => {
+    state.year = e.target.value;
+    render();
+  });
+  $("tiles").addEventListener("input", (e) => {
+    $("tilesLabel").textContent = e.target.value;
+  });
+  $("tiles").addEventListener("change", render);
+  $("download").addEventListener("click", downloadPng);
+  $("theme").addEventListener("click", () => {
+    applyTheme(isDark() ? "light" : "dark");
+    buildHighlightPicker();
+    render();
+  });
+
+  for (const btn of document.querySelectorAll("[data-view]")) {
+    btn.addEventListener("click", () => {
+      state.view = btn.dataset.view;
+      render();
+    });
+  }
+  for (const btn of document.querySelectorAll("[data-mode]")) {
+    btn.addEventListener("click", () => {
+      state.mode = btn.dataset.mode;
+      render();
+    });
+  }
+  for (const btn of document.querySelectorAll("[data-trend]")) {
+    btn.addEventListener("click", () => {
+      state.trend = btn.dataset.trend;
+      render();
+    });
+  }
+
+  loadGeography(state.geography);
 }
 
 init();
