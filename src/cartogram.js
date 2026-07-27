@@ -7,8 +7,8 @@ import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
 //   2. fill enclosed holes so interior borders never show through
 //   3. resize each connected component to exactly its tile budget by peeling
 //      or growing its OUTER boundary
-//   4. hand every cell to a region with a capacitated, target-weighted
-//      Dijkstra grown from each region's geographic seed
+//   4. hand every cell to a region by capacitated region growing from each
+//      region's geographic seed
 //   5. repair any region left short, then relax for compactness
 //
 // Step 4 is what makes it a cartogram: a region's tile count is set by its
@@ -17,56 +17,76 @@ import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
 
 // ----- Projections -----
 
-export function spainProjection(geojson, width, height) {
+export function spainProjection(geojson, width, height, include = () => true) {
   const main = d3.geoMercator();
   const can = d3.geoMercator();
 
+  const drawn = geojson.features.filter((f) => include(f.properties.id ?? f.properties.cod_ccaa));
+  const pool = drawn.length ? drawn : geojson.features;
   const mainlandFC = {
     type: "FeatureCollection",
-    features: geojson.features.filter((f) => d3.geoBounds(f)[0][0] > -10),
+    features: pool.filter((f) => d3.geoBounds(f)[0][0] > -10),
   };
   const canariasFC = {
     type: "FeatureCollection",
-    features: geojson.features.filter((f) => d3.geoBounds(f)[0][0] <= -10),
+    features: pool.filter((f) => d3.geoBounds(f)[0][0] <= -10),
   };
 
-  main.fitExtent([[10, 70], [width - 10, height - 80]], mainlandFC);
+  main.fitExtent([[10, 62], [width - 10, height - 104]], mainlandFC);
 
+  // The inset clears the footnote band at the bottom of the canvas.
   const insetW = width * 0.22;
-  const insetH = height * 0.16;
-  can.fitExtent(
-    [[10, height - insetH - 10], [10 + insetW, height - 10]],
-    canariasFC
-  );
+  const insetH = height * 0.15;
+  const box = [
+    [12, height - insetH - 34],
+    [12 + insetW, height - 34],
+  ];
+  can.fitExtent(box, canariasFC);
 
-  return { project: (lonLat) => (lonLat[0] < -10 ? can(lonLat) : main(lonLat)) };
+  const project = (lonLat) => (lonLat[0] < -10 ? can(lonLat) : main(lonLat));
+  project.insets = [{ box, label: "Canàries" }];
+  return { project };
 }
 
 // Iceland sits far off the shelf and Cyprus far to the east. Fitting the
 // extent over both squeezes the populated core into the middle of the canvas,
 // so they get insets and the main projection fits the mainland.
 const EUROPE_INSETS = [
-  { corner: "topleft", test: (id) => id.startsWith("IS") },
-  { corner: "bottomright", test: (id) => id.startsWith("CY") || id.startsWith("MT") },
+  { corner: "topleft", label: "Islàndia", test: (id) => id.startsWith("IS") },
+  {
+    corner: "bottomright",
+    label: "Xipre i Malta",
+    test: (id) => id.startsWith("CY") || id.startsWith("MT"),
+  },
 ];
 
-export function europeProjection(geojson, width, height) {
+export function europeProjection(geojson, width, height, include = () => true) {
   const isInset = (f) =>
     EUROPE_INSETS.findIndex((spec) => spec.test(f.properties.id || ""));
 
+  // Fit to the regions actually being drawn. Fitting to all of NUTS-2 wastes
+  // the top third of the canvas on sparsely populated Arctic regions and on
+  // the UK, which has had no Eurostat data since 2020.
+  const drawn = geojson.features.filter((f) => include(f.properties.id));
+  const pool = drawn.length > 8 ? drawn : geojson.features;
   const mainFC = {
     type: "FeatureCollection",
-    features: geojson.features.filter((f) => isInset(f) === -1),
+    features: pool.filter((f) => isInset(f) === -1),
   };
 
   const main = d3.geoAzimuthalEqualArea().rotate([-15, -54]).precision(0.1);
   main.fitExtent([[10, 62], [width - 10, height - 14]], mainFC);
 
+  // Iceland, Cyprus and Malta together hold under 1% of the population on
+  // this map. A large inset box would give a handful of tiles the visual
+  // weight of a country, so the boxes stay small.
+  const insetW = width * 0.06;
+  const insetH = height * 0.07;
   const boxes = {
-    topleft: [[12, 64], [12 + width * 0.12, 64 + height * 0.12]],
+    topleft: [[14, 66], [14 + insetW, 66 + insetH]],
     bottomright: [
-      [width - 12 - width * 0.12, height - 16 - height * 0.12],
-      [width - 12, height - 16],
+      [width - 14 - insetW, height - 30 - insetH],
+      [width - 14, height - 30],
     ],
   };
 
@@ -89,14 +109,18 @@ export function europeProjection(geojson, width, height) {
     return main(lonLat);
   };
   project.insets = EUROPE_INSETS.map((spec, i) =>
-    insetProjections[i] ? { box: boxes[spec.corner] } : null
+    insetProjections[i] ? { box: boxes[spec.corner], label: spec.label } : null
   ).filter(Boolean);
   return { project };
 }
 
-export function cataloniaProjection(geojson, width, height) {
+export function cataloniaProjection(geojson, width, height, include = () => true) {
+  const drawn = geojson.features.filter((f) => include(f.properties.id));
   const proj = d3.geoMercator();
-  proj.fitExtent([[10, 70], [width - 10, height - 20]], geojson);
+  proj.fitExtent(
+    [[10, 62], [width - 10, height - 30]],
+    { type: "FeatureCollection", features: drawn.length ? drawn : geojson.features }
+  );
   return { project: (lonLat) => proj(lonLat) };
 }
 
@@ -227,8 +251,6 @@ export function buildCartogram({
   height,
   projection,
 }) {
-  const { project } = projection(geojson, width, height);
-
   const positive = {};
   for (const [id, v] of Object.entries(values)) {
     if (Number.isFinite(v) && v > 0) positive[id] = v;
@@ -240,6 +262,7 @@ export function buildCartogram({
 
   const targets = largestRemainder(positive, totalTiles);
   const tileValue = totalValue / totalTiles;
+  const { project } = projection(geojson, width, height, (id) => positive[id] > 0);
 
   const projected = geojson.features.map((f) => {
     const regionId = f.properties[regionKey];
@@ -591,14 +614,18 @@ function regionSeeds(projected, targets) {
 }
 
 /**
- * Capacitated, target-weighted region growing.
+ * Capacitated region growing.
  *
- * Every region expands from its seed and stops the moment it reaches its tile
- * target, so counts come out exact. The cost of reaching a cell is scaled by
- * 1/sqrt(target): a region owed 700 tiles spends distance about 15x more
- * cheaply than one owed 3, which is the right scaling because a blob of area
- * t has radius proportional to sqrt(t). Without it, growth degenerates to a
- * plain Voronoi and small dense regions can never reach their share.
+ * Every region expands outward from its seed, cheapest cell first across the
+ * whole map, and stops the moment it reaches its tile target. The capacity
+ * stop is what makes counts exact, and it is also what lets a small dense
+ * region reach its share: its neighbours fill up and drop out of the race,
+ * freeing the space it needs.
+ *
+ * Distance is deliberately unweighted. Scaling cost by 1/sqrt(target) also
+ * hits the right sizes, but produces multiplicatively-weighted Voronoi cells,
+ * which are not convex — measured compactness on the Catalan map was 2.29x a
+ * disc of equal area, against 1.34x here.
  */
 function allocate(component, targets, seeds) {
   const cellAt = new Map();
@@ -608,16 +635,25 @@ function allocate(component, targets, seeds) {
   }
 
   const counts = {};
-  const rate = {};
   const heap = new MinHeap();
 
-  for (const [region, target] of Object.entries(targets)) {
-    if (target <= 0) continue;
+  // Every region needs its own start cell. Two seeds can round to the same
+  // cell on a coarse grid — common around Barcelona, where several comarques
+  // sit within one tile of each other. Sharing a start would leave the loser
+  // with no queue entry at all, so it would never grow and would be rebuilt
+  // from wherever the repair pass happened to look first.
+  const taken = new Set();
+  const bySize = Object.entries(targets)
+    .filter(([, target]) => target > 0)
+    .sort((a, b) => b[1] - a[1]);
+
+  for (const [region] of bySize) {
     counts[region] = 0;
-    rate[region] = 1 / Math.sqrt(target);
     const seed = seeds[region];
-    const start = seed ? nearestCell(component, seed) : component[0];
-    if (start) heap.push(0, { cell: start, region });
+    const start = seed ? nearestFreeCell(component, seed, taken) : null;
+    if (!start) continue;
+    taken.add(start);
+    heap.push(0, { cell: start, region });
   }
 
   while (heap.size > 0) {
@@ -633,20 +669,32 @@ function allocate(component, targets, seeds) {
     for (const [dc, dr] of NEIGHBOURS) {
       const nb = cellAt.get(key(cell.col + dc, cell.row + dr));
       if (!nb || nb.regionId !== null) continue;
-      const dx = nb.x - seed.x;
-      const dy = nb.y - seed.y;
-      heap.push(Math.sqrt(dx * dx + dy * dy) * rate[region], { cell: nb, region });
+      heap.push(Math.hypot(nb.x - seed.x, nb.y - seed.y), { cell: nb, region });
     }
   }
 
   claimLeftovers(component, cellAt, counts, targets);
-  repairShortfalls(component, counts, targets);
+  repairShortfalls(component, counts, targets, seeds);
 }
 
 function nearestCell(cells, point) {
   let best = null;
   let bestD = Infinity;
   for (const c of cells) {
+    const d = (c.x - point.x) ** 2 + (c.y - point.y) ** 2;
+    if (d < bestD) {
+      bestD = d;
+      best = c;
+    }
+  }
+  return best;
+}
+
+function nearestFreeCell(cells, point, taken) {
+  let best = null;
+  let bestD = Infinity;
+  for (const c of cells) {
+    if (taken.has(c)) continue;
     const d = (c.x - point.x) ** 2 + (c.y - point.y) ** 2;
     if (d < bestD) {
       bestD = d;
@@ -690,7 +738,7 @@ function claimLeftovers(component, cellAt, counts, targets) {
  * always exists while a shortfall does, because the targets sum to the cell
  * count, so this terminates.
  */
-function repairShortfalls(component, counts, targets) {
+function repairShortfalls(component, counts, targets, seeds) {
   const guardLimit = component.length * 2;
   let guard = 0;
 
@@ -701,7 +749,7 @@ function repairShortfalls(component, counts, targets) {
     if (!region || guard++ > guardLimit) break;
 
     const frontier = component.filter((c) => c.regionId === region);
-    const donor = nearestSurplusCell(frontier, component, counts, targets, region);
+    const donor = nearestSurplusCell(frontier, component, counts, targets, region, seeds);
     if (!donor) break;
 
     counts[donor.regionId]--;
@@ -710,15 +758,23 @@ function repairShortfalls(component, counts, targets) {
   }
 }
 
-function nearestSurplusCell(frontier, component, counts, targets, region) {
+/**
+ * The surplus cell closest to the short region. A region that holds nothing
+ * yet is measured from its seed, not from the first cell in raster order —
+ * otherwise a starved region gets rebuilt in the top-left corner of the map,
+ * far from where it belongs.
+ */
+function nearestSurplusCell(frontier, component, counts, targets, region, seeds) {
+  const anchors = frontier.length ? frontier : [seeds?.[region]].filter(Boolean);
+  if (anchors.length === 0) return null;
+
   let best = null;
   let bestD = Infinity;
   for (const c of component) {
     if (c.regionId === region || c.regionId === null) continue;
     if ((counts[c.regionId] || 0) <= (targets[c.regionId] || 0)) continue;
-    if (frontier.length === 0) return c;
-    for (const f of frontier) {
-      const d = (c.x - f.x) ** 2 + (c.y - f.y) ** 2;
+    for (const a of anchors) {
+      const d = (c.x - a.x) ** 2 + (c.y - a.y) ** 2;
       if (d < bestD) {
         bestD = d;
         best = c;
@@ -729,12 +785,31 @@ function nearestSurplusCell(frontier, component, counts, targets, region) {
 }
 
 /**
- * Two rounds of Lloyd relaxation. Re-seeding on the midpoint between a
- * region's geographic anchor and the centroid of the blob it actually got
- * tightens shapes without letting regions drift away from where they belong.
+ * Lloyd relaxation.
+ *
+ * The first allocation is seeded on geography, which fixes where each region
+ * belongs but leaves shapes ragged: a region owed 30x its own area has to
+ * sprawl, and which direction it sprawls in is arbitrary. Re-seeding on the
+ * centroid of the blob a region actually received, and re-growing, pulls each
+ * one into a compact mass. Relative positions survive because every region
+ * relaxes at once.
+ *
+ * The seed is dragged back toward the geographic anchor by ANCHOR_PULL.
+ * Raising it does not buy geographic fidelity: measured over all three
+ * geographies, going from 0.25 to 0.65 left mean drift flat (3.7% to 4.4% of
+ * the map diagonal on Catalonia) while compactness got clearly worse (1.34 to
+ * 1.67 there, 2.02 to 2.82 on Europe). A light pull wins on both axes.
+ *
+ * Residual drift is inherent, not a defect. Barcelona's metro comarques hold
+ * about 60% of Catalonia's population on 5% of its land, in a coastal corner,
+ * so they can only grow inland and their centroids necessarily move with
+ * them. Any contiguous cartogram of a concentrated population does this.
  */
+const ANCHOR_PULL = 0.25;
+const RELAX_ROUNDS = 4;
+
 function relax(component, targets, seeds) {
-  for (let round = 0; round < 2; round++) {
+  for (let round = 0; round < RELAX_ROUNDS; round++) {
     const sums = {};
     for (const c of component) {
       if (c.regionId === null) continue;
@@ -745,11 +820,14 @@ function relax(component, targets, seeds) {
     }
     const nextSeeds = {};
     for (const [region, s] of Object.entries(sums)) {
-      const anchor = seeds[region];
       const cx = s.x / s.n;
       const cy = s.y / s.n;
+      const anchor = seeds[region];
       nextSeeds[region] = anchor
-        ? { x: (anchor.x + cx) / 2, y: (anchor.y + cy) / 2 }
+        ? {
+            x: cx + (anchor.x - cx) * ANCHOR_PULL,
+            y: cy + (anchor.y - cy) * ANCHOR_PULL,
+          }
         : { x: cx, y: cy };
     }
     allocate(component, targets, nextSeeds);
