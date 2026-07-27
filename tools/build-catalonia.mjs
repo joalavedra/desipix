@@ -135,7 +135,7 @@ function extract(js, metric) {
   const sizes = js.size;
   const cats = dimIds.map((d) => codes(js.dimension[d]));
 
-  const pinned = { ...(metric.filter || {}) };
+  const pinned = { ...metric.filter };
   const pickCode = resolvePick(js, metric.pick);
   if (pickCode !== null) pinned[metric.pick.dim] = pickCode;
 
