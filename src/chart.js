@@ -125,6 +125,33 @@ function axes(svg, x, y, yTicks, formatY) {
 }
 
 /**
+ * Pick the base year for indexing.
+ *
+ * Indexing to the very first year silently drops every region that has no
+ * value there, and the chart gives no sign of it: Europe's population series
+ * starts in 1991 with 133 regions against 245 in the latest year, so nearly
+ * half the map would vanish without saying so. Walk forward to the earliest
+ * year that covers most of the regions the latest year covers, and trade a
+ * few years of history for an honest denominator.
+ */
+const BASE_YEAR_COVERAGE = 0.9;
+
+function chooseBaseYear(dataset, labels, years) {
+  const ids = Object.keys(labels);
+  const countAt = (year) =>
+    ids.reduce((n, id) => n + (Number.isFinite(dataset.values[year]?.[id]) ? 1 : 0), 0);
+
+  const latest = countAt(years.at(-1));
+  if (latest === 0) return years[0];
+
+  for (const year of years) {
+    if (countAt(year) >= latest * BASE_YEAR_COVERAGE) return year;
+  }
+  // Nothing clears the bar: fall back to whichever year covers the most.
+  return years.reduce((best, y) => (countAt(y) > countAt(best) ? y : best), years[0]);
+}
+
+/**
  * Indexed multi-line chart.
  *
  * @param {object} opts
@@ -151,13 +178,15 @@ export function drawTrend({ svg, dataset, labels, highlight, indexed, title }) {
     return;
   }
 
-  const baseYear = years[0];
+  const baseYear = indexed ? chooseBaseYear(dataset, labels, years) : years[0];
+  const plotYears = years.filter((y) => y >= baseYear);
+
   const series = [];
   for (const [id, name] of Object.entries(labels)) {
     const base = dataset.values[baseYear]?.[id];
     if (indexed && !Number.isFinite(base)) continue;
     const points = [];
-    for (const year of years) {
+    for (const year of plotYears) {
       const v = dataset.values[year]?.[id];
       if (!Number.isFinite(v)) continue;
       points.push([year, indexed ? (v / base) * 100 : v]);
@@ -166,21 +195,29 @@ export function drawTrend({ svg, dataset, labels, highlight, indexed, title }) {
   }
   if (series.length === 0) return;
 
+  const covered = series.length;
+  const total = Object.keys(labels).length;
+
   const picked = highlight.filter((id) => series.some((s) => s.id === id));
   const mode = isDark() ? "dark" : "light";
   const colours = CATEGORICAL[mode];
 
   const allY = series.flatMap((s) => s.points.map((p) => p[1]));
-  const x = d3.scaleLinear().domain([years[0], years.at(-1)]).range([PAD.left, CW - PAD.right]);
+  const x = d3
+    .scaleLinear()
+    .domain([plotYears[0], plotYears.at(-1)])
+    .range([PAD.left, CW - PAD.right]);
   const y = d3
     .scaleLinear()
     .domain([Math.min(...allY), Math.max(...allY)])
     .nice()
     .range([CH - PAD.bottom, PAD.top]);
 
+  const span = `${plotYears[0]}–${plotYears.at(-1)}`;
+  const coverage = covered < total ? ` ${covered} de ${total} regions.` : "";
   const subtitle = indexed
-    ? `Índex: 100 = ${baseYear}. Dades anuals ${years[0]}–${years.at(-1)}.`
-    : `${dataset.label} en ${dataset.unit}. Dades anuals ${years[0]}–${years.at(-1)}.`;
+    ? `Índex: 100 = ${baseYear}. Dades anuals ${span}.${coverage}`
+    : `${dataset.label} en ${dataset.unit}. Dades anuals ${span}.${coverage}`;
   frame(svg, title, subtitle, `Font: ${dataset.source}`);
   axes(svg, x, y, y.ticks(6), (t) => formatCompact(t, indexed ? null : dataset));
 
@@ -299,7 +336,7 @@ export function drawTrend({ svg, dataset, labels, highlight, indexed, title }) {
     );
   }
 
-  addCrosshair({ svg, x, y, series, picked, colours, years, dataset, indexed });
+  addCrosshair({ svg, x, y, series, picked, colours, years: plotYears, dataset, indexed });
   return { x, y, series, picked, colours, baseYear };
 }
 

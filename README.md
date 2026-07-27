@@ -72,8 +72,12 @@ vanishing.
    only, so resizing can never punch a hole.
 4. Grow every region outward from its geographic seed, cheapest cell first
    across the whole map, stopping the moment it hits its tile target.
-5. Repair any region left short, then relax with Lloyd iterations for
-   compactness.
+5. Repair any region left short by shifting cells along an augmenting path
+   through touching regions, so counts balance without stranding
+   disconnected islands of one region inside another.
+6. Trade small detached fragments back to whichever region surrounds them,
+   swapping in pairs so every count stays exact.
+7. Relax with Lloyd iterations for compactness.
 
 Step 4 is what makes it a cartogram rather than a coloured map: tile counts
 come from the data, not from area. Barcelonès holds 29% of Catalonia's
@@ -84,6 +88,13 @@ Distance in step 4 is deliberately **unweighted**. Scaling cost by
 multiplicatively-weighted Voronoi regions, which are not convex: measured
 compactness on the Catalan map was 2.29x an equal-area disc, against 1.34x
 unweighted, at identical allocation error.
+
+`tools/matrix.html` is the other harness: it walks every geography and
+indicator and checks dataset schema, value sanity, weight/indicator year
+overlap, per-weight allocation error, and whether any region ends up in more
+than one blob. It found three bugs after the first build — 86 of 240 Europe
+regions fragmented, 48 tiles silently dropped from Spain's tourism map, and
+the indexed trend chart quietly hiding half of Europe.
 
 Regions do move. A cartogram of a concentrated population has no choice —
 Barcelona's metro comarques hold about 60% of Catalonia's people on 5% of its
@@ -97,9 +108,9 @@ compactness and geographic drift. Serve the repo and open
 
 | geography | mean alloc. error | compactness | mean drift |
 |---|---|---|---|
-| Espanya | 0.5% | 1.18 | 4.5% |
-| Catalunya | 0.0% | 1.34 | 3.7% |
-| Europa | 0.2% | 2.02 | 8.0% |
+| Espanya | 0.1% | 1.16 | 3.8% |
+| Catalunya | 0.0% | 1.11 | 3.7% |
+| Europa | 0.2% | 1.24 | 7.5% |
 
 Compactness is mean radius over that of an equal-area disc (1.0 is a perfect
 disc). Drift is the distance from a region's true centroid to its blob

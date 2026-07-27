@@ -17,36 +17,52 @@ import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
 
 // ----- Projections -----
 
-export function spainProjection(geojson, width, height, include = () => true) {
+export function spainProjection(
+  geojson,
+  width,
+  height,
+  include = () => true,
+  shareOf = null
+) {
   const main = d3.geoMercator();
   const can = d3.geoMercator();
 
-  const drawn = geojson.features.filter((f) => include(f.properties.id ?? f.properties.cod_ccaa));
+  const idOf = (f) => f.properties.id ?? f.properties.cod_ccaa;
+  const drawn = geojson.features.filter((f) => include(idOf(f)));
   const pool = drawn.length ? drawn : geojson.features;
-  const mainlandFC = {
-    type: "FeatureCollection",
-    features: pool.filter((f) => d3.geoBounds(f)[0][0] > -10),
-  };
-  const canariasFC = {
-    type: "FeatureCollection",
-    features: pool.filter((f) => d3.geoBounds(f)[0][0] <= -10),
-  };
+  const isCanaries = (f) => d3.geoBounds(f)[0][0] <= -10;
+  const mainlandFC = { type: "FeatureCollection", features: pool.filter((f) => !isCanaries(f)) };
+  const canariasFC = { type: "FeatureCollection", features: pool.filter(isCanaries) };
 
-  main.fitExtent([[10, 62], [width - 10, height - 104]], mainlandFC);
+  // An inset is a fixed viewport but a cartogram needs area in proportion to
+  // the data, so the box is sized from the Canaries' share of the weight.
+  // With a fixed box, tourism (20% of Spain's nights) could not fit: the
+  // islands grew until they blocked each other and 48 tiles were dropped.
+  const share = shareOf
+    ? canariasFC.features.reduce((sum, f) => sum + (shareOf(idOf(f)) || 0), 0)
+    : 0.05;
+  const usable = (width - 22) * (height - 96);
+  const area = clampRange(share * usable * 1.35, usable * 0.04, usable * 0.26);
+  const aspect = 1.7; // the archipelago is much wider than it is tall
+  const insetW = clampRange(Math.sqrt(area * aspect), width * 0.2, width * 0.56);
+  const insetH = clampRange(area / insetW, height * 0.1, height * 0.3);
 
-  // The inset clears the footnote band at the bottom of the canvas.
-  const insetW = width * 0.22;
-  const insetH = height * 0.15;
+  // The box sits in a reserved band at the bottom, clear of the footnote, and
+  // the mainland fits above it. Sizing the box without reserving the band let
+  // the Canaries overlap Andalusia once tourism made the inset large.
   const box = [
     [12, height - insetH - 34],
     [12 + insetW, height - 34],
   ];
   can.fitExtent(box, canariasFC);
+  main.fitExtent([[10, 62], [width - 10, height - insetH - 60]], mainlandFC);
 
   const project = (lonLat) => (lonLat[0] < -10 ? can(lonLat) : main(lonLat));
   project.insets = [{ box, label: "Canàries" }];
   return { project };
 }
+
+const clampRange = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 // Iceland sits far off the shelf and Cyprus far to the east. Fitting the
 // extent over both squeezes the populated core into the middle of the canvas,
@@ -262,7 +278,13 @@ export function buildCartogram({
 
   const targets = largestRemainder(positive, totalTiles);
   const tileValue = totalValue / totalTiles;
-  const { project } = projection(geojson, width, height, (id) => positive[id] > 0);
+  const { project } = projection(
+    geojson,
+    width,
+    height,
+    (id) => positive[id] > 0,
+    (id) => (positive[id] || 0) / totalValue
+  );
 
   const projected = geojson.features.map((f) => {
     const regionId = f.properties[regionKey];
@@ -674,7 +696,131 @@ function allocate(component, targets, seeds) {
   }
 
   claimLeftovers(component, cellAt, counts, targets);
-  repairShortfalls(component, counts, targets, seeds);
+  repairShortfalls(component, cellAt, counts, targets, seeds);
+  defragment(component, cellAt);
+}
+
+/** Group a region's cells into 4-connected blobs. */
+function blobsOf(cells, cellAt, region) {
+  const owned = new Set();
+  for (const c of cells) if (c.regionId === region) owned.add(key(c.col, c.row));
+
+  const seen = new Set();
+  const blobs = [];
+  for (const c of cells) {
+    if (c.regionId !== region) continue;
+    const k0 = key(c.col, c.row);
+    if (seen.has(k0)) continue;
+    const blob = [];
+    const stack = [c];
+    seen.add(k0);
+    while (stack.length) {
+      const q = stack.pop();
+      blob.push(q);
+      for (const [dc, dr] of NEIGHBOURS) {
+        const k = key(q.col + dc, q.row + dr);
+        if (!owned.has(k) || seen.has(k)) continue;
+        seen.add(k);
+        stack.push(cellAt.get(k));
+      }
+    }
+    blobs.push(blob);
+  }
+  return blobs;
+}
+
+/**
+ * Trade small detached fragments back into whichever region surrounds them,
+ * taking an equivalent cell next to the region's main blob in exchange.
+ *
+ * Swapping in pairs keeps every count exact, so this cannot undo the
+ * balancing above. It runs because handing a cell across a border during
+ * repair can nip off a piece of the donor: without this, 19 of 240 Europe
+ * regions ended up in more than one blob, including landlocked ones like
+ * Köln and Stuttgart where a stray fragment reads as a rendering error.
+ * Genuine archipelagos are left alone — they sit in separate components and
+ * never meet here.
+ */
+const MAX_FRAGMENT = 8;
+
+function defragment(component, cellAt) {
+  for (let pass = 0; pass < 3; pass++) {
+    let swaps = 0;
+    const regions = new Set(component.map((c) => c.regionId).filter(Boolean));
+
+    for (const region of regions) {
+      const blobs = blobsOf(component, cellAt, region);
+      if (blobs.length < 2) continue;
+      blobs.sort((a, b) => b.length - a.length);
+      const main = new Set(blobs[0].map((c) => key(c.col, c.row)));
+
+      for (const fragment of blobs.slice(1)) {
+        if (fragment.length > MAX_FRAGMENT) continue;
+        for (const cell of fragment) {
+          const host = dominantNeighbour(cell, cellAt, region);
+          if (!host) break;
+          const swap = cellTouching(component, cellAt, host, main);
+          if (!swap) break;
+
+          // Taking a cell out of the host can split the host in turn, which
+          // would just move the problem. Only keep the swap if the two
+          // regions end up in fewer pieces between them than they started.
+          const before =
+            blobsOf(component, cellAt, region).length +
+            blobsOf(component, cellAt, host).length;
+          cell.regionId = host;
+          swap.regionId = region;
+          const after =
+            blobsOf(component, cellAt, region).length +
+            blobsOf(component, cellAt, host).length;
+
+          if (after > before) {
+            cell.regionId = region;
+            swap.regionId = host;
+            continue;
+          }
+          main.add(key(swap.col, swap.row));
+          swaps++;
+        }
+      }
+    }
+    if (swaps === 0) break;
+  }
+}
+
+function dominantNeighbour(cell, cellAt, region) {
+  const tally = {};
+  for (const [dc, dr] of NEIGHBOURS) {
+    const nb = cellAt.get(key(cell.col + dc, cell.row + dr));
+    if (nb && nb.regionId && nb.regionId !== region) {
+      tally[nb.regionId] = (tally[nb.regionId] || 0) + 1;
+    }
+  }
+  const best = Object.entries(tally).sort((a, b) => b[1] - a[1])[0];
+  return best ? best[0] : null;
+}
+
+/** A cell of `region` touching the given blob, least embedded in its own. */
+function cellTouching(component, cellAt, region, blob) {
+  let best = null;
+  let bestAttachment = Infinity;
+  for (const c of component) {
+    if (c.regionId !== region) continue;
+    let touches = false;
+    let attachment = 0;
+    for (const [dc, dr] of NEIGHBOURS) {
+      const k = key(c.col + dc, c.row + dr);
+      if (blob.has(k)) touches = true;
+      const nb = cellAt.get(k);
+      if (nb && nb.regionId === region) attachment++;
+    }
+    if (!touches) continue;
+    if (attachment < bestAttachment) {
+      bestAttachment = attachment;
+      best = c;
+    }
+  }
+  return best;
 }
 
 function nearestCell(cells, point) {
@@ -738,8 +884,24 @@ function claimLeftovers(component, cellAt, counts, targets) {
  * always exists while a shortfall does, because the targets sum to the cell
  * count, so this terminates.
  */
-function repairShortfalls(component, counts, targets, seeds) {
-  const guardLimit = component.length * 2;
+/**
+ * Balance the counts by shifting cells along an augmenting path.
+ *
+ * A short region is rarely adjacent to a region that has spare cells, so a
+ * single hop is not enough. Instead, walk the region adjacency graph out from
+ * the short region until a region with a surplus turns up, then move one cell
+ * across each border along that path. Total shortfall falls by exactly one
+ * per path, so this converges.
+ *
+ * Both weaker versions were measured and rejected. Taking the nearest surplus
+ * cell anywhere on the map balances the counts but strands disconnected
+ * islands of one region inside another (86 of 240 Europe regions fragmented).
+ * Taking from any adjacent neighbour and letting the donor go short in turn
+ * keeps regions whole but oscillates between two neighbours instead of
+ * converging (allocation error rose to 56% on Europe).
+ */
+function repairShortfalls(component, cellAt, counts, targets, seeds) {
+  const guardLimit = component.length * 4;
   let guard = 0;
 
   for (;;) {
@@ -748,37 +910,107 @@ function repairShortfalls(component, counts, targets, seeds) {
     );
     if (!region || guard++ > guardLimit) break;
 
-    const frontier = component.filter((c) => c.regionId === region);
-    const donor = nearestSurplusCell(frontier, component, counts, targets, region, seeds);
-    if (!donor) break;
+    // A region holding nothing has no border to cross, so it restarts at the
+    // surplus cell nearest its seed. Measuring from the seed rather than the
+    // first cell in raster order is what stops a starved region reappearing
+    // in the top-left corner of the map.
+    if (!(counts[region] > 0)) {
+      const donor = seedDonor(component, counts, targets, seeds?.[region]);
+      if (!donor) break;
+      counts[donor.regionId]--;
+      donor.regionId = region;
+      counts[region] = (counts[region] || 0) + 1;
+      continue;
+    }
 
-    counts[donor.regionId]--;
-    donor.regionId = region;
-    counts[region] = (counts[region] || 0) + 1;
+    const path = pathToSurplus(component, cellAt, counts, targets, region);
+    if (!path) break;
+
+    let moved = false;
+    for (let i = path.length - 1; i >= 1; i--) {
+      const cell = borderCell(component, cellAt, path[i - 1], path[i]);
+      if (!cell) break;
+      counts[cell.regionId]--;
+      cell.regionId = path[i - 1];
+      counts[path[i - 1]]++;
+      moved = true;
+    }
+    if (!moved) break;
   }
 }
 
-/**
- * The surplus cell closest to the short region. A region that holds nothing
- * yet is measured from its seed, not from the first cell in raster order —
- * otherwise a starved region gets rebuilt in the top-left corner of the map,
- * far from where it belongs.
- */
-function nearestSurplusCell(frontier, component, counts, targets, region, seeds) {
-  const anchors = frontier.length ? frontier : [seeds?.[region]].filter(Boolean);
-  if (anchors.length === 0) return null;
+/** Region ids adjacent to `region`, walking its border cells. */
+function neighbourRegions(component, cellAt, region) {
+  const found = new Set();
+  for (const c of component) {
+    if (c.regionId !== region) continue;
+    for (const [dc, dr] of NEIGHBOURS) {
+      const nb = cellAt.get(key(c.col + dc, c.row + dr));
+      if (nb && nb.regionId !== null && nb.regionId !== region) found.add(nb.regionId);
+    }
+  }
+  return found;
+}
 
+/** Shortest chain of touching regions from `start` to one holding a surplus. */
+function pathToSurplus(component, cellAt, counts, targets, start) {
+  const cameFrom = new Map([[start, null]]);
+  const queue = [start];
+
+  while (queue.length) {
+    const region = queue.shift();
+    if (region !== start && (counts[region] || 0) > (targets[region] || 0)) {
+      const path = [];
+      for (let r = region; r !== null; r = cameFrom.get(r)) path.unshift(r);
+      return path;
+    }
+    for (const next of neighbourRegions(component, cellAt, region)) {
+      if (cameFrom.has(next)) continue;
+      cameFrom.set(next, region);
+      queue.push(next);
+    }
+  }
+  return null;
+}
+
+/**
+ * A cell of `from` touching `to`, picking the one least embedded in `from` so
+ * that handing it over does not cut the donor in two.
+ */
+function borderCell(component, cellAt, to, from) {
+  let best = null;
+  let bestAttachment = Infinity;
+
+  for (const c of component) {
+    if (c.regionId !== from) continue;
+    let touchesTo = false;
+    let attachment = 0;
+    for (const [dc, dr] of NEIGHBOURS) {
+      const nb = cellAt.get(key(c.col + dc, c.row + dr));
+      if (!nb) continue;
+      if (nb.regionId === to) touchesTo = true;
+      if (nb.regionId === from) attachment++;
+    }
+    if (!touchesTo) continue;
+    if (attachment < bestAttachment) {
+      bestAttachment = attachment;
+      best = c;
+    }
+  }
+  return best;
+}
+
+function seedDonor(component, counts, targets, seed) {
+  if (!seed) return null;
   let best = null;
   let bestD = Infinity;
   for (const c of component) {
-    if (c.regionId === region || c.regionId === null) continue;
+    if (c.regionId === null) continue;
     if ((counts[c.regionId] || 0) <= (targets[c.regionId] || 0)) continue;
-    for (const a of anchors) {
-      const d = (c.x - a.x) ** 2 + (c.y - a.y) ** 2;
-      if (d < bestD) {
-        bestD = d;
-        best = c;
-      }
+    const d = (c.x - seed.x) ** 2 + (c.y - seed.y) ** 2;
+    if (d < bestD) {
+      bestD = d;
+      best = c;
     }
   }
   return best;

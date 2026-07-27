@@ -23,7 +23,17 @@ const el = (name, attrs = {}) => {
  */
 function projectionFor(ctx) {
   if (!ctx._project) {
-    const { project } = ctx.projection(ctx.geojson, W, H, (id) => ctx.weights[id] > 0);
+    const total = Object.values(ctx.weights).reduce(
+      (sum, v) => sum + (Number.isFinite(v) && v > 0 ? v : 0),
+      0
+    );
+    const { project } = ctx.projection(
+      ctx.geojson,
+      W,
+      H,
+      (id) => ctx.weights[id] > 0,
+      (id) => (total > 0 ? (ctx.weights[id] || 0) / total : 0)
+    );
     ctx._project = project;
   }
   return ctx._project;
